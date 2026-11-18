@@ -408,6 +408,21 @@ async def dashboard_endpoint(
 # REST Endpoints: Auth Token Discovery & Zero-Trust Approvals
 # ============================================================================
 
+@app.get("/api/health")
+async def health_check():
+    """
+    Lightweight health check endpoint returning system status and component telemetry.
+    """
+    return {
+        "status": "healthy",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "version": "0.1.0",
+        "scheduler_running": scheduler.running,
+        "browser_bridges_connected": len(manager.browser_bridges),
+        "dashboard_clients_connected": len(manager.dashboard_clients),
+    }
+
+
 @app.get("/api/auth/token")
 async def get_bridge_token_info():
     """

@@ -22,3 +22,16 @@ def test_db_path_resolution(isolated_vibecore_home):
 def test_bridge_token_resolution():
     token = get_or_create_bridge_token()
     assert token == "test-secret-bridge-token-12345"
+
+
+def test_api_health_endpoint():
+    from fastapi.testclient import TestClient
+    from app.main import app
+
+    client = TestClient(app)
+    response = client.get("/api/health")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["status"] == "healthy"
+    assert data["version"] == "0.1.0"
+    assert "scheduler_running" in data
