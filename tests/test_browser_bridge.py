@@ -1,0 +1,115 @@
+"""
+Integration tests for Chrome Extension WebSocket Bridge & Workflow Frames.
+Author: Sandeep Hipparagi (https://github.com/Sandeep-Hipparagi)
+"""
+
+import json
+import pytest
+from datetime import datetime, timezone
+from fastapi.testclient import TestClient
+from starlette.websockets import WebSocketDisconnect
+
+from app.main import app, context_graph, tool_dispatcher
+from app.config import get_or_create_bridge_token
+from app.schemas import BridgeMessage, BridgeMessageType, ContextNodeType
+
+
+def test_ws_browser_bridge_unauthorized():
+    client = TestClient(app)
+    with pytest.raises(WebSocketDisconnect) as excinfo:
+        with client.websocket_connect("/ws/browser-bridge?token=invalid_token") as ws:
+            pass
+    assert excinfo.value.code == 1008
+
+
+def test_ws_browser_bridge_telemetry_and_quarantine():
+    client = TestClient(app)
+    token = get_or_create_bridge_token()
+
+    with client.websocket_connect(f"/ws/browser-bridge?token={token}") as ws:
+        # 1. Send Grocery Price Snapshot frame
+        grocery_payload = {
+            "portal": "instacart.com",
+            "title": "Organic Almond Milk 64 fl oz",
+            "unit_price": 3.99,
+            "currency": "USD",
+            "in_stock": True,
+            "url": "https://www.instacart.com/products/123",
+            "can_stage_cart": True,
+            "extracted_at": datetime.now(timezone.utc).isoformat(),
+        }
+        msg_grocery = BridgeMessage(
+            msg_type=BridgeMessageType.DOM_GROCERY_SNAPSHOT,
+            payload=grocery_payload,
+        )
+        ws.send_text(msg_grocery.model_dump_json())
+
+        # 2. Send WhatsApp incoming message frame
+        wa_payload = {
+            "app": "whatsapp_web",
+            "chat_name": "Research Group",
+            "sender": "Alex",
+            "text": "Please confirm the server IP when you can.",
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+        msg_wa = BridgeMessage(
+            msg_type=BridgeMessageType.WHATSAPP_INCOMING_MESSAGE,
+            payload=wa_payload,
+        )
+        ws.send_text(msg_wa.model_dump_json())
+
+        # 3. Send Instagram saved posts batch frame
+        ig_payload = {
+            "items": [
+                {
+                    "post_url": "https://instagram.com/p/DB12345",
+                    "author": "ai_researcher",
+                    "caption": "New paper on temporal graph pruning for autonomous agents.",
+                    "extracted_at": datetime.now(timezone.utc).isoformat(),
+                }
+            ]
+        }
+        msg_ig = BridgeMessage(
+            msg_type=BridgeMessageType.INSTAGRAM_SAVED_BATCH,
+            payload=ig_payload,
+        )
+        ws.send_text(msg_ig.model_dump_json())
+
+    # Verify context_graph stored nodes with prompt injection quarantine
+    grocery_nodes = context_graph.find_nodes(node_type=ContextNodeType.FACT, tag="instacart.com")
+    assert len(grocery_nodes) > 0
+    assert "<untrusted_dom_payload>" in grocery_nodes[0].content["sanitized_title"]
+
+    wa_nodes = context_graph.find_nodes(node_type=ContextNodeType.EPISODE, tag="whatsapp")
+    assert len(wa_nodes) > 0
+    assert "<untrusted_dom_payload>" in wa_nodes[0].content["sanitized_text"]
+
+    ig_nodes = context_graph.find_nodes(node_type=ContextNodeType.FACT, tag="instagram")
+    assert len(ig_nodes) > 0
+    assert "<untrusted_dom_payload>" in ig_nodes[0].content["sanitized_caption"]
+
+
+@pytest.mark.asyncio
+async def test_commit_action_dispatched_to_connected_browser():
+    """
+    Verifies that when a Chrome Extension client is connected, ToolDispatcher.dispatch()
+    formats and transmits a COMMIT_ACTION frame over WebSocket.
+    """
+    client = TestClient(app)
+    token = get_or_create_bridge_token()
+
+    with client.websocket_connect(f"/ws/browser-bridge?token={token}") as ws:
+        # Dispatch WhatsApp send while browser bridge is connected
+        send_payload = {
+            "chat_name": "Team Lead",
+            "text": "Staged report is approved and ready.",
+        }
+        dispatch_result = await tool_dispatcher.dispatch("whatsapp_send_message", send_payload)
+        assert dispatch_result["status"] == "DISPATCHED_TO_BROWSER"
+
+        # The connected extension receives the COMMIT_ACTION frame over WS
+        raw_frame = ws.receive_text()
+        frame_data = json.loads(raw_frame)
+        assert frame_data["msg_type"] == "COMMIT_ACTION"
+        assert frame_data["payload"]["command"] == "COMMIT_WHATSAPP_SEND"
+        assert frame_data["payload"]["text"] == "Staged report is approved and ready."

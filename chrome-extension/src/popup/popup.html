@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>VibeCore Bridge</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <div class="container">
+    <!-- Header -->
+    <header class="header">
+      <div class="logo-group">
+        <span class="icon">🧠</span>
+        <div>
+          <h1 class="title">VibeCore</h1>
+          <p class="subtitle">Authenticated Browser Bridge</p>
+        </div>
+      </div>
+      <div id="status-pill" class="pill disconnected">Disconnected</div>
+    </header>
+
+    <!-- Token Settings -->
+    <section class="section">
+      <label for="token-input" class="label">Bridge Auth Token (~/.vibecore/bridge.token):</label>
+      <div class="input-row">
+        <input type="password" id="token-input" placeholder="Paste local handshake token..." />
+        <button id="save-token-btn" class="btn btn-secondary">Save</button>
+      </div>
+      <p id="token-feedback" class="feedback-text"></p>
+    </section>
+
+    <!-- Workflow Toggles -->
+    <section class="section">
+      <h2 class="section-title">Active Workflows</h2>
+      <div class="toggle-group">
+        <label class="toggle-item">
+          <input type="checkbox" id="toggle-whatsapp" checked />
+          <span class="toggle-label">WhatsApp 24/7 Co-Pilot</span>
+        </label>
+        <label class="toggle-item">
+          <input type="checkbox" id="toggle-grocery" checked />
+          <span class="toggle-label">Grocery & Price Drop Tracker</span>
+        </label>
+        <label class="toggle-item">
+          <input type="checkbox" id="toggle-instagram" checked />
+          <span class="toggle-label">Instagram Saved Archivist</span>
+        </label>
+      </div>
+    </section>
+
+    <!-- Manual Actions -->
+    <section class="section footer-actions">
+      <button id="scan-tab-btn" class="btn btn-primary full-width">⚡ Scan Current Tab Now</button>
+      <button id="reconnect-btn" class="btn btn-outline full-width">🔄 Reconnect Bridge</button>
+      <p id="action-feedback" class="feedback-text"></p>
+    </section>
+
+    <!-- Footer -->
+    <footer class="footer">
+      <span>Author: Sandeep Hipparagi</span> • <span>Zero-Trust v0.1.0</span>
+    </footer>
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>

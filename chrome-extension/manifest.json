@@ -1,0 +1,41 @@
+{
+  "manifest_version": 3,
+  "name": "VibeCore Browser Bridge",
+  "version": "0.1.0",
+  "description": "Authenticated browser session bridge for VibeCore personal agent swarm",
+  "permissions": [
+    "tabs",
+    "activeTab",
+    "scripting",
+    "storage"
+  ],
+  "host_permissions": [
+    "http://127.0.0.1:8000/*",
+    "ws://127.0.0.1:8000/*",
+    "*://web.whatsapp.com/*",
+    "*://*.amazon.com/*",
+    "*://*.instacart.com/*",
+    "*://*.instagram.com/*"
+  ],
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "VibeCore Bridge"
+  },
+  "background": {
+    "service_worker": "dist/service_worker.js",
+    "type": "module"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "*://web.whatsapp.com/*",
+        "*://*.amazon.com/*",
+        "*://*.instacart.com/*",
+        "*://*.instagram.com/*",
+        "*://*/*"
+      ],
+      "js": ["dist/content_script.js"],
+      "run_at": "document_idle"
+    }
+  ]
+}

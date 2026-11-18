@@ -1,0 +1,21 @@
+{
+  "name": "vibecore-chrome-bridge",
+  "version": "0.1.0",
+  "description": "Authenticated browser session bridge for VibeCore personal agent swarm",
+  "author": "Sandeep Hipparagi (https://github.com/Sandeep-Hipparagi)",
+  "license": "Apache-2.0",
+  "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Sandeep-Hipparagi/Context-Intuition.git"
+  },
+  "scripts": {
+    "type-check": "tsc --noEmit",
+    "build": "tsc --noEmit && node build.mjs"
+  },
+  "devDependencies": {
+    "@types/chrome": "^0.0.280",
+    "esbuild": "^0.24.0",
+    "typescript": "^5.6.3"
+  }
+}
