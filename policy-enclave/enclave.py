@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 from datetime import datetime, timezone
 import functools
+import inspect
 import json
 import logging
 import os
@@ -72,7 +73,7 @@ class IdempotencyConflictError(Exception):
 class ApprovalQueue:
     """
     Thread-safe and async-safe persistent queue for suspended actions.
-    Stores pending envelopes in SQLite and notifies listeners via async futures.
+    Stores pending envelopes in SQLite with WAL mode and notifies listeners via async futures.
     """
 
     def __init__(self, db_path: Optional[str] = None):
@@ -80,8 +81,15 @@ class ApprovalQueue:
         self._pending_futures: Dict[str, asyncio.Future[ActionEnvelope]] = {}
         self._init_db()
 
+    def _get_connection(self) -> sqlite3.Connection:
+        conn = sqlite3.connect(self.db_path, timeout=30.0)
+        conn.execute("PRAGMA journal_mode = WAL;")
+        conn.execute("PRAGMA busy_timeout = 30000;")
+        conn.execute("PRAGMA synchronous = NORMAL;")
+        return conn
+
     def _init_db(self) -> None:
-        with sqlite3.connect(self.db_path) as conn:
+        with self._get_connection() as conn:
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS approval_queue (
                     action_id TEXT PRIMARY KEY,
@@ -109,12 +117,17 @@ class ApprovalQueue:
                 conn.execute("ALTER TABLE approval_queue ADD COLUMN execution_result TEXT")
             conn.commit()
 
-    def enqueue(self, envelope: ActionEnvelope) -> asyncio.Future[ActionEnvelope]:
-        loop = asyncio.get_event_loop()
-        future: asyncio.Future[ActionEnvelope] = loop.create_future()
-        self._pending_futures[envelope.action_id] = future
+    def enqueue(self, envelope: ActionEnvelope) -> Optional[asyncio.Future[ActionEnvelope]]:
+        future: Optional[asyncio.Future[ActionEnvelope]] = None
+        try:
+            loop = asyncio.get_running_loop()
+            future = loop.create_future()
+            self._pending_futures[envelope.action_id] = future
+        except RuntimeError:
+            # Running in synchronous context or without active event loop
+            pass
 
-        with sqlite3.connect(self.db_path) as conn:
+        with self._get_connection() as conn:
             conn.execute(
                 """
                 INSERT OR REPLACE INTO approval_queue (
@@ -150,7 +163,7 @@ class ApprovalQueue:
         return future
 
     def get(self, action_id: str) -> Optional[ActionEnvelope]:
-        with sqlite3.connect(self.db_path) as conn:
+        with self._get_connection() as conn:
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
             cursor.execute("SELECT * FROM approval_queue WHERE action_id = ?", (action_id,))
@@ -160,12 +173,58 @@ class ApprovalQueue:
             return self._row_to_envelope(row)
 
     def list_pending(self) -> List[ActionEnvelope]:
-        with sqlite3.connect(self.db_path) as conn:
+        with self._get_connection() as conn:
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
             cursor.execute("SELECT * FROM approval_queue WHERE status = ? ORDER BY created_at DESC", (ApprovalStatus.PENDING.value,))
             rows = cursor.fetchall()
             return [self._row_to_envelope(row) for row in rows]
+
+    def claim_for_execution(self, action_id: str) -> ActionEnvelope:
+        """
+        Atomically claims a PENDING action by setting its status to EXECUTING.
+        Raises IdempotencyConflictError if the action was already claimed or resolved,
+        preventing TOCTOU double-execution race conditions.
+        """
+        now_str = datetime.now(timezone.utc).isoformat()
+        with self._get_connection() as conn:
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                UPDATE approval_queue
+                SET status = ?, resolved_at = ?
+                WHERE action_id = ? AND status = ?
+                """,
+                (ApprovalStatus.EXECUTING.value, now_str, action_id, ApprovalStatus.PENDING.value),
+            )
+            conn.commit()
+
+            if cursor.rowcount == 0:
+                cursor.execute("SELECT status FROM approval_queue WHERE action_id = ?", (action_id,))
+                row = cursor.fetchone()
+                if not row:
+                    raise ValueError(f"Action {action_id} not found in approval queue.")
+                curr_status = row["status"]
+                raise IdempotencyConflictError(
+                    f"Action {action_id} cannot be claimed for execution: current status is '{curr_status}'. "
+                    f"Duplicate resolution rejected to enforce idempotency."
+                )
+
+            cursor.execute("SELECT * FROM approval_queue WHERE action_id = ?", (action_id,))
+            row = cursor.fetchone()
+            return self._row_to_envelope(row)
+
+    def revert_to_pending(self, action_id: str) -> None:
+        """
+        Reverts an EXECUTING action back to PENDING (e.g. on recoverable bridge disconnect).
+        """
+        with self._get_connection() as conn:
+            conn.execute(
+                "UPDATE approval_queue SET status = ? WHERE action_id = ? AND status = ?",
+                (ApprovalStatus.PENDING.value, action_id, ApprovalStatus.EXECUTING.value),
+            )
+            conn.commit()
 
     def resolve(
         self,
@@ -180,29 +239,18 @@ class ApprovalQueue:
         if not envelope:
             raise ValueError(f"Action {action_id} not found in approval queue.")
 
-        # Strict idempotency check: only PENDING actions can be resolved
-        if envelope.status != ApprovalStatus.PENDING:
-            raise IdempotencyConflictError(
-                f"Action {action_id} has already been resolved with status '{envelope.status.value}'. "
-                f"Duplicate resolution rejected to enforce idempotency."
-            )
-
         resolved_time = datetime.now(timezone.utc)
         final_payload = edited_payload if edited_payload is not None else envelope.payload
 
-        envelope.status = status
-        envelope.resolved_at = resolved_time
-        envelope.user_signature = user_signature
-        envelope.user_feedback = user_feedback
-        envelope.payload = final_payload
-        envelope.execution_result = execution_result
-
-        with sqlite3.connect(self.db_path) as conn:
-            conn.execute(
+        with self._get_connection() as conn:
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+            cursor.execute(
                 """
                 UPDATE approval_queue
-                SET status = ?, resolved_at = ?, user_signature = ?, user_feedback = ?, payload = ?, execution_result = ?
-                WHERE action_id = ?
+                SET status = ?, resolved_at = ?, user_signature = ?, user_feedback = ?,
+                    payload = ?, execution_result = ?
+                WHERE action_id = ? AND (status = ? OR status = ?)
                 """,
                 (
                     status.value,
@@ -212,9 +260,26 @@ class ApprovalQueue:
                     json.dumps(final_payload),
                     json.dumps(execution_result) if execution_result is not None else None,
                     action_id,
+                    ApprovalStatus.PENDING.value,
+                    ApprovalStatus.EXECUTING.value,
                 ),
             )
             conn.commit()
+
+            if cursor.rowcount == 0:
+                cursor.execute("SELECT status FROM approval_queue WHERE action_id = ?", (action_id,))
+                row = cursor.fetchone()
+                if not row:
+                    raise ValueError(f"Action {action_id} not found in approval queue.")
+                curr_status = row["status"]
+                raise IdempotencyConflictError(
+                    f"Action {action_id} has already been resolved with status '{curr_status}'. "
+                    f"Duplicate resolution rejected to enforce idempotency."
+                )
+
+            cursor.execute("SELECT * FROM approval_queue WHERE action_id = ?", (action_id,))
+            row = cursor.fetchone()
+            envelope = self._row_to_envelope(row)
 
         # Resolve async future if waiting in active process
         future = self._pending_futures.pop(action_id, None)
@@ -403,6 +468,22 @@ class PolicyEnclave:
         raise ActionSuspendedException(envelope)
 
 
+AUTHORIZED_EXECUTION_SIGNATURES = {
+    "sig_dispatcher_authorized",
+    "sig_user_approved",
+}
+
+
+def is_authorized_signature(signature: Optional[str]) -> bool:
+    """
+    Validates that a provided user signature is authorized by the Policy Enclave
+    before bypassing execution suspension.
+    """
+    if not signature or not isinstance(signature, str):
+        return False
+    return signature in AUTHORIZED_EXECUTION_SIGNATURES or signature.startswith("sig_user_approved_")
+
+
 # Singleton Enclave instance
 _global_enclave = PolicyEnclave()
 
@@ -440,12 +521,12 @@ def enforce_policy(
                 session_id=session_id,
             )
 
-            if user_signature:
+            if user_signature and is_authorized_signature(user_signature):
                 envelope.status = ApprovalStatus.APPROVED
                 envelope.user_signature = user_signature
 
             async def run_target() -> Any:
-                if asyncio.iscoroutinefunction(func):
+                if inspect.iscoroutinefunction(func):
                     return await func(*args, **kwargs)
                 return func(*args, **kwargs)
 

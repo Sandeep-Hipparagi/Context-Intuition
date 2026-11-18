@@ -39,10 +39,14 @@ def get_staged_clips_dir() -> Path:
     return clips_dir
 
 
+SUBPROCESS_TIMEOUT_SECONDS = 15.0
+
+
 class FFmpegClippingTool:
     """
     Watches designated raw video folders, cuts highlight clips based on
     speech energy / transcript markers, and stages them locally.
+    Enforces strict subprocess timeouts and error isolation for corrupted media.
     """
 
     @staticmethod
@@ -51,12 +55,13 @@ class FFmpegClippingTool:
 
     @staticmethod
     @enforce_policy(tool_name="ffmpeg_probe_metadata", tier=TierLevel.TIER_0_OBSERVE)
-    async def probe_metadata(file_path: str, **kwargs: Any) -> Dict[str, Any]:
+    async def probe_metadata(file_path: str, timeout: float = SUBPROCESS_TIMEOUT_SECONDS, **kwargs: Any) -> Dict[str, Any]:
         """
         Probes media container metadata using ffprobe or fallback inspection.
+        Guards against hangs on corrupt media via strict timeouts.
         """
         path = Path(file_path)
-        if not path.exists():
+        if not path.exists() or not path.is_file():
             return {
                 "file_path": file_path,
                 "exists": False,
@@ -78,14 +83,22 @@ class FFmpegClippingTool:
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE
                 )
-                stdout, _ = await proc.communicate()
-                return {
-                    "file_path": str(path),
-                    "exists": True,
-                    "raw_probe": stdout.decode("utf-8", errors="ignore")[:300],
-                    "duration_seconds": 184.5,
-                    "resolution": "1920x1080",
-                }
+                try:
+                    stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+                    return {
+                        "file_path": str(path),
+                        "exists": True,
+                        "raw_probe": stdout.decode("utf-8", errors="ignore")[:300],
+                        "duration_seconds": 184.5,
+                        "resolution": "1920x1080",
+                    }
+                except asyncio.TimeoutError:
+                    try:
+                        proc.kill()
+                        await proc.wait()
+                    except Exception:
+                        pass
+                    logger.warning(f"ffprobe timed out after {timeout}s on {path}")
             except Exception as e:
                 logger.warning(f"ffprobe execution failed: {e}")
 
@@ -107,11 +120,13 @@ class FFmpegClippingTool:
         aspect_ratio: str = "9:16",
         clip_name: Optional[str] = None,
         transcript_snippet: Optional[str] = None,
+        timeout: float = SUBPROCESS_TIMEOUT_SECONDS,
         **kwargs: Any
     ) -> Dict[str, Any]:
         """
         Cuts a raw video highlight and exports vertical/horizontal clip into ~/.vibecore/staged_clips/.
         Generates corresponding .srt subtitle file for immediate review.
+        Guarantees timeout bounds against hangs on corrupted input streams.
         """
         clips_dir = get_staged_clips_dir()
         base_name = clip_name or f"clip_{int(start_time)}_{int(end_time)}_{uuid4().hex[:6]}"
@@ -129,13 +144,14 @@ class FFmpegClippingTool:
         output_srt.write_text(srt_content, encoding="utf-8")
 
         # 2. Execute ffmpeg if installed
-        if FFmpegClippingTool.is_ffmpeg_available() and Path(input_path).exists():
+        target_input = Path(input_path)
+        if FFmpegClippingTool.is_ffmpeg_available() and target_input.exists() and target_input.is_file():
             scale_filter = "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920" if aspect_ratio == "9:16" else "scale=1920:1080"
             cmd = [
                 "ffmpeg", "-y",
                 "-ss", str(start_time),
                 "-to", str(end_time),
-                "-i", input_path,
+                "-i", str(target_input),
                 "-vf", scale_filter,
                 "-c:v", "libx264",
                 "-preset", "fast",
@@ -148,12 +164,21 @@ class FFmpegClippingTool:
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE
                 )
-                await proc.communicate()
+                try:
+                    await asyncio.wait_for(proc.communicate(), timeout=timeout)
+                except asyncio.TimeoutError:
+                    try:
+                        proc.kill()
+                        await proc.wait()
+                    except Exception:
+                        pass
+                    logger.warning(f"ffmpeg timed out after {timeout}s on {input_path}")
+                    output_mp4.touch()
             except Exception as e:
                 logger.warning(f"ffmpeg subprocess execution failed: {e}. Staging metadata stub.")
                 output_mp4.touch()
         else:
-            # Fallback stub file for test/offline environments
+            # Fallback stub file for test/offline environments or missing inputs
             logger.info(f"ffmpeg not available or input not found; creating staged clip placeholder at {output_mp4}")
             output_mp4.touch()
 

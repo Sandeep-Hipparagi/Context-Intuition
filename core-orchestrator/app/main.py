@@ -12,9 +12,11 @@ from __future__ import annotations
 from contextlib import asynccontextmanager
 import asyncio
 from datetime import datetime, timezone
+import hmac
 import json
 import logging
 import os
+import re
 from typing import Any, Dict, List, Optional
 from uuid import uuid4
 
@@ -132,23 +134,53 @@ async def handle_edit_delta(envelope: ActionEnvelope, revised_payload: Dict[str,
 policy_enclave.register_edit_delta_callback(handle_edit_delta)
 
 
+ALLOWED_ORIGIN_PATTERNS = [
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+]
+
+MAX_WS_FRAME_SIZE = 1_048_576  # 1 MB max frame size
+MAX_BATCH_ITEMS = 200          # Max items per telemetry batch
+
+
+def is_allowed_origin(origin: Optional[str]) -> bool:
+    """
+    Validates WebSocket origin header against authorized clients and Chrome extension schemes.
+    """
+    if not origin or origin == "null":
+        # Direct WebSocket connections from desktop tools or extensions
+        return True
+    if origin.startswith("chrome-extension://"):
+        return True
+    return origin in ALLOWED_ORIGIN_PATTERNS
+
+
 def sanitize_dom_payload(raw_content: Any) -> str:
     """
-    Wraps untrusted browser DOM inputs in security delimiters to mitigate
+    Sanitizes untrusted browser DOM inputs: strips null bytes, escapes delimiter
+    breakout sequences, and isolates within security boundaries to mitigate
     indirect prompt injection attacks against downstream LLM parsers.
     """
-    text = str(raw_content).strip()
+    text = str(raw_content).replace("\x00", "").strip()
+    # Escape closing and opening tags to prevent delimiter breakout or framing spoofing
+    text = re.sub(r'<\s*/\s*untrusted_dom_payload\s*>', '&lt;/untrusted_dom_payload&gt;', text, flags=re.IGNORECASE)
+    text = re.sub(r'<\s*untrusted_dom_payload\s*>', '&lt;untrusted_dom_payload&gt;', text, flags=re.IGNORECASE)
     return f"<untrusted_dom_payload>\n{text}\n</untrusted_dom_payload>"
 
 
 def verify_ws_token(token: Optional[str]) -> bool:
     """
-    Validates the handshake token against the active VibeCore bridge token.
+    Validates the handshake token using constant-time comparison to mitigate timing attacks.
+    Rejects empty or missing tokens strictly.
     """
+    if not token or not token.strip():
+        return False
     expected = get_or_create_bridge_token()
-    if not expected:
-        return True
-    return token == expected
+    if not expected or not expected.strip():
+        return False
+    return hmac.compare_digest(token.strip(), expected.strip())
 
 
 # ============================================================================
@@ -213,7 +245,14 @@ async def browser_bridge_endpoint(
     websocket: WebSocket,
     token: Optional[str] = Query(None),
 ):
-    # Verify authentication token
+    # Verify origin header
+    origin = websocket.headers.get("origin")
+    if not is_allowed_origin(origin):
+        logger.warning(f"Rejected browser bridge connection from untrusted origin: {origin}")
+        await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+        return
+
+    # Verify authentication token with constant-time check
     if not verify_ws_token(token):
         logger.warning("Rejected unauthorized browser bridge connection attempt.")
         await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
@@ -223,8 +262,26 @@ async def browser_bridge_endpoint(
     try:
         while True:
             raw_text = await websocket.receive_text()
-            data = json.loads(raw_text)
-            message = BridgeMessage(**data)
+
+            # Guard against oversized payloads
+            if len(raw_text) > MAX_WS_FRAME_SIZE:
+                logger.warning(f"Rejected oversized frame ({len(raw_text)} bytes > {MAX_WS_FRAME_SIZE})")
+                await websocket.send_text(json.dumps({
+                    "error": "FRAME_OVERSIZED",
+                    "detail": f"Payload size exceeds limit of {MAX_WS_FRAME_SIZE} bytes",
+                }))
+                continue
+
+            try:
+                data = json.loads(raw_text)
+                message = BridgeMessage(**data)
+            except Exception as e:
+                logger.warning(f"Malformed JSON/Message received: {e}")
+                await websocket.send_text(json.dumps({
+                    "error": "MALFORMED_PAYLOAD",
+                    "detail": str(e),
+                }))
+                continue
 
             if message.msg_type == BridgeMessageType.HEARTBEAT:
                 continue
@@ -277,6 +334,10 @@ async def browser_bridge_endpoint(
 
             elif message.msg_type == BridgeMessageType.INSTAGRAM_SAVED_BATCH:
                 items = message.payload.get("items", [])
+                if len(items) > MAX_BATCH_ITEMS:
+                    logger.warning(f"Trimming batch items from {len(items)} to {MAX_BATCH_ITEMS}")
+                    items = items[:MAX_BATCH_ITEMS]
+
                 for item in items:
                     caption = item.get("caption", "")
                     author = item.get("author", "creator")
@@ -317,6 +378,14 @@ async def dashboard_endpoint(
     websocket: WebSocket,
     token: Optional[str] = Query(None),
 ):
+    # Verify origin header
+    origin = websocket.headers.get("origin")
+    if not is_allowed_origin(origin):
+        logger.warning(f"Rejected dashboard connection from untrusted origin: {origin}")
+        await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+        return
+
+    # Verify authentication token
     if not verify_ws_token(token):
         logger.warning("Rejected unauthorized dashboard connection attempt.")
         await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
@@ -367,23 +436,19 @@ async def list_pending_approvals():
 async def resolve_approval(action_id: str, request: ResolveActionRequest):
     """
     Approves, Rejects, or Approves with Edits a staged Tier-2 action.
-    Enforces strict idempotency. Dispatches approved actions to ToolDispatcher.
+    Enforces atomic idempotency via database claim to prevent TOCTOU double-execution.
+    Dispatches approved actions to ToolDispatcher.
     Triggers the Edit-Delta Learning Engine if the payload was edited.
     """
-    envelope = policy_enclave.queue.get(action_id)
-    if not envelope:
-        raise HTTPException(status_code=404, detail="Action envelope not found")
-
-    # Strict idempotency check
-    if envelope.status != ApprovalStatus.PENDING:
-        raise HTTPException(
-            status_code=409,
-            detail=f"Action {action_id} has already been resolved with status '{envelope.status.value}'. Duplicate resolution rejected."
-        )
-
-    execution_result = None
-
     if request.status in (ApprovalStatus.APPROVED, ApprovalStatus.EDITED):
+        # 1. Atomically claim execution slot to prevent TOCTOU race conditions
+        try:
+            envelope = policy_enclave.queue.claim_for_execution(action_id)
+        except IdempotencyConflictError as e:
+            raise HTTPException(status_code=409, detail=str(e))
+        except ValueError as e:
+            raise HTTPException(status_code=404, detail=str(e))
+
         final_payload = (
             request.edited_payload
             if (request.status == ApprovalStatus.EDITED and request.edited_payload is not None)
@@ -394,17 +459,22 @@ async def resolve_approval(action_id: str, request: ResolveActionRequest):
         if request.status == ApprovalStatus.EDITED and request.edited_payload:
             await edit_delta_engine.learn_from_edit(envelope, request.edited_payload)
 
-        # Dispatch the finalized payload to the registered execution handler
+        # Dispatch the finalized payload to the registered execution handler with verified envelope_id
         try:
-            execution_result = await tool_dispatcher.dispatch(envelope.tool_name, final_payload)
+            execution_result = await tool_dispatcher.dispatch(
+                envelope.tool_name,
+                final_payload,
+                envelope_id=action_id,
+            )
         except BridgeDisconnectedError as e:
-            # Recoverable browser disconnection: keep action in PENDING state
+            # Recoverable browser disconnection: revert action back to PENDING state
+            policy_enclave.queue.revert_to_pending(action_id)
             raise HTTPException(status_code=503, detail=str(e))
         except Exception as e:
             logger.error(f"Execution error dispatching tool {envelope.tool_name}: {e}")
+            policy_enclave.queue.revert_to_pending(action_id)
             raise HTTPException(status_code=500, detail=f"Tool execution failed: {str(e)}")
 
-    try:
         resolved = policy_enclave.queue.resolve(
             action_id=action_id,
             status=request.status,
@@ -413,8 +483,19 @@ async def resolve_approval(action_id: str, request: ResolveActionRequest):
             user_feedback=request.user_feedback,
             execution_result=execution_result,
         )
-    except IdempotencyConflictError as e:
-        raise HTTPException(status_code=409, detail=str(e))
+    else:
+        # Rejection or non-executing resolution
+        try:
+            resolved = policy_enclave.queue.resolve(
+                action_id=action_id,
+                status=request.status,
+                user_signature=request.user_signature,
+                user_feedback=request.user_feedback,
+            )
+        except IdempotencyConflictError as e:
+            raise HTTPException(status_code=409, detail=str(e))
+        except ValueError as e:
+            raise HTTPException(status_code=404, detail=str(e))
 
     await manager.broadcast_to_dashboards("ACTION_RESOLVED", resolved.model_dump(mode="json"))
     return resolved

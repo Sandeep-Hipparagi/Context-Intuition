@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 
-from app.main import app, context_graph, tool_dispatcher
+from app.main import app, context_graph, tool_dispatcher, policy_enclave
 from app.config import get_or_create_bridge_token
 from app.schemas import BridgeMessage, BridgeMessageType, ContextNodeType
 
@@ -104,7 +104,21 @@ async def test_commit_action_dispatched_to_connected_browser():
             "chat_name": "Team Lead",
             "text": "Staged report is approved and ready.",
         }
-        dispatch_result = await tool_dispatcher.dispatch("whatsapp_send_message", send_payload)
+        # Prepare and claim an envelope to satisfy zero-trust policy
+        envelope = policy_enclave.prepare_envelope(
+            tool_name="whatsapp_send_message",
+            payload=send_payload,
+            agent_id="test_agent",
+            session_id="test_sess",
+        )
+        policy_enclave.queue.enqueue(envelope)
+        policy_enclave.queue.claim_for_execution(envelope.action_id)
+
+        dispatch_result = await tool_dispatcher.dispatch(
+            "whatsapp_send_message",
+            send_payload,
+            envelope_id=envelope.action_id,
+        )
         assert dispatch_result["status"] == "DISPATCHED_TO_BROWSER"
 
         # The connected extension receives the COMMIT_ACTION frame over WS

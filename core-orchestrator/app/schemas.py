@@ -30,9 +30,11 @@ class TierLevel(str, Enum):
 
 class ApprovalStatus(str, Enum):
     PENDING = "PENDING"
+    EXECUTING = "EXECUTING"
     APPROVED = "APPROVED"
     REJECTED = "REJECTED"
     EDITED = "EDITED"
+    FAILED = "FAILED"
     EXPIRED = "EXPIRED"
 
 

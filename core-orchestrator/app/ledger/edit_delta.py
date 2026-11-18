@@ -45,8 +45,15 @@ class EditDeltaEngine:
         self.db_path = db_path or str(get_db_path("behavioral_rules.db"))
         self._init_db()
 
+    def _get_connection(self) -> sqlite3.Connection:
+        conn = sqlite3.connect(self.db_path, timeout=30.0)
+        conn.execute("PRAGMA journal_mode = WAL;")
+        conn.execute("PRAGMA busy_timeout = 30000;")
+        conn.execute("PRAGMA synchronous = NORMAL;")
+        return conn
+
     def _init_db(self) -> None:
-        with sqlite3.connect(self.db_path) as conn:
+        with self._get_connection() as conn:
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS behavioral_rules (
                     rule_id TEXT PRIMARY KEY,
@@ -151,7 +158,7 @@ class EditDeltaEngine:
         return rule
 
     def _save_or_reinforce_rule(self, rule: BehavioralRule) -> None:
-        with sqlite3.connect(self.db_path) as conn:
+        with self._get_connection() as conn:
             # Check if similar trigger exists to reinforce weight
             cursor = conn.cursor()
             cursor.execute(
@@ -203,7 +210,7 @@ class EditDeltaEngine:
             conn.commit()
 
     def get_applicable_rules(self, category: Optional[BehavioralCategory] = None) -> List[BehavioralRule]:
-        with sqlite3.connect(self.db_path) as conn:
+        with self._get_connection() as conn:
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
             if category:

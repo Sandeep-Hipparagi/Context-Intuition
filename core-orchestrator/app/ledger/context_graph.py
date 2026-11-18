@@ -43,8 +43,15 @@ class ContextKnowledgeGraph:
         self.db_path = db_path or str(get_db_path("context_ledger.db"))
         self._init_db()
 
+    def _get_connection(self) -> sqlite3.Connection:
+        conn = sqlite3.connect(self.db_path, timeout=30.0)
+        conn.execute("PRAGMA journal_mode = WAL;")
+        conn.execute("PRAGMA busy_timeout = 30000;")
+        conn.execute("PRAGMA synchronous = NORMAL;")
+        return conn
+
     def _init_db(self) -> None:
-        with sqlite3.connect(self.db_path) as conn:
+        with self._get_connection() as conn:
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS context_nodes (
                     node_id TEXT PRIMARY KEY,
@@ -79,7 +86,7 @@ class ContextKnowledgeGraph:
 
     def upsert_node(self, node: ContextNode) -> None:
         now_str = datetime.now(timezone.utc).isoformat()
-        with sqlite3.connect(self.db_path) as conn:
+        with self._get_connection() as conn:
             conn.execute(
                 """
                 INSERT OR REPLACE INTO context_nodes (
@@ -124,7 +131,7 @@ class ContextKnowledgeGraph:
             conn.commit()
 
     def get_node(self, node_id: str) -> Optional[ContextNode]:
-        with sqlite3.connect(self.db_path) as conn:
+        with self._get_connection() as conn:
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
             cursor.execute("SELECT * FROM context_nodes WHERE node_id = ?", (node_id,))
@@ -140,7 +147,7 @@ class ContextKnowledgeGraph:
         min_relevance: float = 0.20,
     ) -> List[ContextNode]:
         results: List[ContextNode] = []
-        with sqlite3.connect(self.db_path) as conn:
+        with self._get_connection() as conn:
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
             query = "SELECT * FROM context_nodes WHERE 1=1"
@@ -170,7 +177,7 @@ class ContextKnowledgeGraph:
         boosting its access count and resetting its decay curve.
         """
         now_str = datetime.now(timezone.utc).isoformat()
-        with sqlite3.connect(self.db_path) as conn:
+        with self._get_connection() as conn:
             conn.execute(
                 """
                 UPDATE context_nodes
@@ -192,7 +199,9 @@ class ContextKnowledgeGraph:
         pruned_count = 0
         consolidated_episodes = 0
 
-        with sqlite3.connect(self.db_path) as conn:
+        trajectory_node: Optional[ContextNode] = None
+
+        with self._get_connection() as conn:
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
 
@@ -237,9 +246,11 @@ class ContextKnowledgeGraph:
                     source="nightly_consolidation",
                     tags=["trajectory", "consolidated_summary"],
                 )
-                self.upsert_node(trajectory_node)
 
             conn.commit()
+
+        if trajectory_node:
+            self.upsert_node(trajectory_node)
 
         logger.info(
             f" [CONSOLIDATION] Nightly pass complete: "

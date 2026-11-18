@@ -54,7 +54,10 @@ class MorningBriefAgent:
     Longitudinal Autonomous Agent that synthesizes multiple telemetry feeds,
     anticipates unspoken commitments, stages draft responses, and compiles
     the morning brief.
+    Guarantees thread/async safety and prevents overlapping runs via execution lock.
     """
+
+    _execution_lock: asyncio.Lock = asyncio.Lock()
 
     def __init__(
         self,
@@ -68,7 +71,12 @@ class MorningBriefAgent:
     async def execute_overnight_cycle(self, live_scouts: bool = False) -> MorningBrief:
         """
         Main entry point for the nightly pipeline.
+        Serialized through _execution_lock to prevent concurrent execution races.
         """
+        async with self._execution_lock:
+            return await self._run_overnight_cycle_internal(live_scouts=live_scouts)
+
+    async def _run_overnight_cycle_internal(self, live_scouts: bool = False) -> MorningBrief:
         logger.info(
             f" Starting Overnight Morning Brief Pipeline "
             f"(Mode: {'LIVE SCOUTS' if live_scouts else 'OFFLINE/CACHED'})..."

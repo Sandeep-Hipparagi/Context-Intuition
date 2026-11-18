@@ -83,15 +83,42 @@ class ToolDispatcher:
         self.register_handler("whatsapp_send_message", self._handle_whatsapp_send)
         self.register_handler("file_delete", self._handle_file_delete)
 
-    async def dispatch(self, tool_name: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+    async def dispatch(
+        self,
+        tool_name: str,
+        payload: Dict[str, Any],
+        envelope_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
         """
         Executes the registered handler for the given tool_name with the finalized payload.
+        Enforces zero-trust: TIER_2 tools cannot be executed without a verified, approved envelope.
         """
+        from enclave import get_policy_enclave, ApprovalStatus, TierLevel
+
+        enclave = get_policy_enclave()
+        tier = enclave.TOOL_CLASSIFICATIONS.get(tool_name, TierLevel.TIER_2_COMMIT)
+
+        if tier == TierLevel.TIER_2_COMMIT:
+            if not envelope_id:
+                raise PermissionError(
+                    f"Direct dispatch of TIER_2 tool '{tool_name}' rejected: Missing verified envelope_id."
+                )
+            envelope = enclave.queue.get(envelope_id)
+            if not envelope:
+                raise PermissionError(
+                    f"Direct dispatch of TIER_2 tool '{tool_name}' rejected: ActionEnvelope '{envelope_id}' not found."
+                )
+            if envelope.status not in (ApprovalStatus.APPROVED, ApprovalStatus.EDITED, ApprovalStatus.EXECUTING):
+                raise PermissionError(
+                    f"Direct dispatch of TIER_2 tool '{tool_name}' rejected: "
+                    f"ActionEnvelope '{envelope_id}' is in unauthorized status '{envelope.status.value}'."
+                )
+
         handler = self._handlers.get(tool_name)
         if not handler:
             raise KeyError(f"No execution handler registered for tool: {tool_name}")
 
-        logger.info(f"Dispatching post-approval execution for tool '{tool_name}'...")
+        logger.info(f"Dispatching post-approval execution for tool '{tool_name}' [envelope: {envelope_id}]...")
         result = await handler(payload)
         logger.info(f"Tool '{tool_name}' executed successfully.")
         return result
@@ -169,7 +196,33 @@ class ToolDispatcher:
         if not path_str:
             raise ValueError("Missing file_path in delete payload")
 
+        from app.config import get_vibecore_home
+
         target_file = Path(path_str).resolve()
+        vibecore_home = get_vibecore_home().resolve()
+
+        # Whitelist authorized sandbox directories
+        allowed_roots = [
+            vibecore_home,
+            vibecore_home / "staged_clips",
+            vibecore_home / "exports",
+            vibecore_home / "temp",
+        ]
+
+        is_safe = False
+        for root in allowed_roots:
+            try:
+                target_file.relative_to(root.resolve())
+                is_safe = True
+                break
+            except ValueError:
+                continue
+
+        if not is_safe:
+            raise PermissionError(
+                f"Path traversal violation: Target '{target_file}' is outside authorized sandbox directories."
+            )
+
         if target_file.exists() and target_file.is_file():
             target_file.unlink()
             return {"status": "DELETED", "path": str(target_file)}
