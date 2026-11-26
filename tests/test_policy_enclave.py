@@ -40,7 +40,7 @@ async def test_tier_2_commit_suspends_and_enqueues(tmp_path):
     tier, risk, factors = enclave.evaluate_risk("ecommerce_checkout_purchase", payload)
     assert tier == TierLevel.TIER_2_COMMIT
     assert risk >= 0.85
-    assert any("Financial commitment" in f for f in factors)
+    assert any("Financial threshold exceeded" in f for f in factors)
 
     envelope = enclave.prepare_envelope("ecommerce_checkout_purchase", payload, "test_agent", "sess_2")
 

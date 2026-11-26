@@ -202,6 +202,28 @@ For a breakdown of completed milestones and upcoming community features, see [RO
 
 ---
 
+## 🚀 Wave 4 Highlights (v0.3.0)
+
+### 🔍 Hybrid Semantic + Temporal Search
+- **LocalEmbeddingEngine**: Ollama `nomic-embed-text` embeddings with deterministic offline fallback (feature-hashed unit vectors).
+- **Persistent Vector Store**: `node_embeddings` SQLite table with binary blobs, auto-generated on node upsert.
+- **Hybrid Ranking**: `hybrid_score = 0.6 × cosine_similarity + 0.4 × normalized_temporal_relevance`.
+- **Live Search UI**: Real-time search bar in Dashboard `ContextInspector` with score badges and clickable results.
+
+### 🧩 Declarative Browser Workflow Plugin Registry
+- **WorkflowPlugin Contract**: `id`, `hostPatterns`, `canarySelectors`, `onMount/onCommand/onUnmount`.
+- **Refactored Plugins**: WhatsApp Co-Pilot, Grocery Tracker, Instagram Archivist registered via `pluginRegistry`.
+- **DOM Canary Health Checks**: Automatic selector validation on mount; emits `SELECTOR_CANARY_WARNING` with `trace_id` on failure.
+- **Dashboard Health Alerts**: Non-intrusive canary warning banner with missing selector details.
+
+---
+
+## 🗺️ Roadmap & Milestones
+
+For a breakdown of completed milestones and upcoming community features, see [ROADMAP.md](ROADMAP.md).
+
+---
+
 ## 📄 License & Authorship
 
 Authored by **[Sandeep Hipparagi](https://github.com/Sandeep-Hipparagi)**.  

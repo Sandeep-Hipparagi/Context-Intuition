@@ -10,7 +10,7 @@ from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 
 from app.main import app, context_graph, tool_dispatcher, policy_enclave
-from app.config import get_or_create_bridge_token
+from app.config import get_or_create_bridge_token, settings
 from app.schemas import BridgeMessage, BridgeMessageType, ContextNodeType
 
 
@@ -114,10 +114,20 @@ async def test_commit_action_dispatched_to_connected_browser():
         policy_enclave.queue.enqueue(envelope)
         policy_enclave.queue.claim_for_execution(envelope.action_id)
 
+        # Mint capability token for authorized execution
+        from capabilities import mint_capability_token
+        capability_token = mint_capability_token(
+            action_id=envelope.action_id,
+            tool_name="whatsapp_send_message",
+            payload=send_payload,
+            profile=settings.PROFILE,
+        )
+
         dispatch_result = await tool_dispatcher.dispatch(
             "whatsapp_send_message",
             send_payload,
             envelope_id=envelope.action_id,
+            capability_token=capability_token,
         )
         assert dispatch_result["status"] == "DISPATCHED_TO_BROWSER"
 

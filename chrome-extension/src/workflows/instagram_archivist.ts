@@ -6,7 +6,7 @@
  * Features rate-limit backoff, alt-text extraction, and batch telemetry transmission.
  */
 
-import { InstagramSavedItem } from '../types/bridge';
+import { InstagramSavedItem, BridgeMessageType, generateTraceId, generateSpanId, BridgeMessageMetadata } from '../types/bridge';
 
 export class InstagramArchivistWorkflow {
   private isRunning: boolean = false;
@@ -105,3 +105,13 @@ export class InstagramArchivistWorkflow {
     return new Promise(resolve => setTimeout(resolve, ms));
   }
 }
+
+// Make globally accessible for plugin registry
+(window as any).__instagramWorkflow = new InstagramArchivistWorkflow((batch) => {
+  chrome.runtime.sendMessage({
+    source: 'vibecore-content-script',
+    msg_type: 'INSTAGRAM_SAVED_BATCH' as BridgeMessageType,
+    payload: { items: batch },
+    metadata: { trace_id: generateTraceId(), span_id: generateSpanId() } as BridgeMessageMetadata,
+  });
+});

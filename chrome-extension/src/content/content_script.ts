@@ -2,116 +2,70 @@
  * Content Script for VibeCore Browser Bridge.
  * Author: Sandeep Hipparagi (https://github.com/Sandeep-Hipparagi)
  *
- * Integrates WhatsApp Web Co-Pilot, Grocery & E-Commerce Price Tracker,
- * and Instagram Archivist workflows directly into the active browser profile.
+ * Integrates declarative workflow plugins via the Plugin Registry.
  */
 
-import { GroceryTrackerWorkflow } from '../workflows/grocery_tracker';
-import { WhatsAppCopilotWorkflow } from '../workflows/whatsapp_copilot';
-import { InstagramArchivistWorkflow } from '../workflows/instagram_archivist';
-import { BridgeMessageType } from '../types/bridge';
+import { pluginRegistry } from '../workflows/plugin_registry';
+import { BridgeMessageType, generateTraceId, generateSpanId, BridgeMessageMetadata } from '../types/bridge';
 
 console.log('[VibeCore ContentScript] Active on host:', window.location.hostname);
 
-const groceryWorkflow = new GroceryTrackerWorkflow();
-const whatsappWorkflow = new WhatsAppCopilotWorkflow((msg) => {
+function sendTelemetry(msgType: BridgeMessageType, payload: unknown): void {
   chrome.runtime.sendMessage({
     source: 'vibecore-content-script',
-    msg_type: 'WHATSAPP_INCOMING_MESSAGE' as BridgeMessageType,
-    payload: msg,
+    msg_type: msgType,
+    payload: payload as Record<string, unknown>,
+    metadata: { trace_id: generateTraceId(), span_id: generateSpanId() } as BridgeMessageMetadata,
   });
-});
+}
 
-const instagramWorkflow = new InstagramArchivistWorkflow((batch) => {
-  chrome.runtime.sendMessage({
-    source: 'vibecore-content-script',
-    msg_type: 'INSTAGRAM_SAVED_BATCH' as BridgeMessageType,
-    payload: { items: batch },
-  });
-});
+// Workflow context for plugins
+const workflowContext = {
+  sendTelemetry,
+  chrome,
+  document,
+  window,
+  log: (msg: string) => console.log(`[VibeCore ContentScript] ${msg}`),
+};
 
-// Boot active workflows according to user storage preferences
-async function bootWorkflows(): Promise<void> {
-  let toggles = { whatsapp_copilot: true, grocery_tracker: true, instagram_archivist: true };
-  try {
-    const stored = await chrome.storage.local.get(['workflows']);
-    if (stored.workflows) toggles = { ...toggles, ...stored.workflows };
-  } catch (e) {
-    // Chrome storage fallback
-  }
+// Boot plugin registry
+async function bootPluginRegistry(): Promise<void> {
+  pluginRegistry.init(workflowContext);
+  
+  // Initialize plugins for current host
+  await pluginRegistry.activateForCurrentHost();
 
-  // 1. WhatsApp Web Co-Pilot
-  if (whatsappWorkflow.isWhatsAppPage() && toggles.whatsapp_copilot) {
-    whatsappWorkflow.startObservation();
-  }
-
-  // 2. Grocery & E-Commerce Tracker
-  if (groceryWorkflow.isSupportedPage() && toggles.grocery_tracker) {
-    setTimeout(() => {
-      const snapshot = groceryWorkflow.extractProductSnapshot();
-      if (snapshot) {
-        chrome.runtime.sendMessage({
-          source: 'vibecore-content-script',
-          msg_type: 'DOM_GROCERY_SNAPSHOT' as BridgeMessageType,
-          payload: snapshot,
-        });
-      }
-    }, 1500);
-  }
-
-  // 3. Instagram Archivist
-  if (instagramWorkflow.isSavedPage() && toggles.instagram_archivist) {
-    instagramWorkflow.startArchiving().catch(console.error);
-  }
+  // Listen for host changes (SPA navigation)
+  let lastHost = window.location.hostname;
+  setInterval(() => {
+    if (window.location.hostname !== lastHost) {
+      lastHost = window.location.hostname;
+      console.log('[VibeCore ContentScript] Host changed, reactivating plugins');
+      pluginRegistry.unmountAll().then(() => pluginRegistry.activateForCurrentHost());
+    }
+  }, 1000);
 }
 
 // Listen for RPC commands dispatched from the Background Service Worker
 chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
   if (request.type === 'EXECUTE_DOM_ACTION') {
     const { command, value } = request;
-
-    // TIER_1_STAGE: WhatsApp Draft Injection
-    if (command === 'STAGE_WHATSAPP_DRAFT') {
-      const res = whatsappWorkflow.stageDraft(value || '');
-      sendResponse(res);
-      return true;
-    }
-
-    // TIER_2_COMMIT: WhatsApp Send Execution (Authorized by Phase 2 ToolDispatcher)
-    if (command === 'COMMIT_WHATSAPP_SEND') {
-      const res = whatsappWorkflow.commitSendMessage();
-      sendResponse(res);
-      return true;
-    }
-
-    // TIER_1_STAGE: Add to Cart
-    if (command === 'STAGE_ADD_TO_CART') {
-      const res = groceryWorkflow.stageAddToCart();
-      sendResponse(res);
-      return true;
-    }
-
-    // Manual Scan Trigger from Popup UI
-    if (command === 'SCAN_CURRENT_TAB') {
-      if (groceryWorkflow.isSupportedPage()) {
-        const snapshot = groceryWorkflow.extractProductSnapshot();
-        if (snapshot) {
-          chrome.runtime.sendMessage({
-            source: 'vibecore-content-script',
-            msg_type: 'DOM_GROCERY_SNAPSHOT' as BridgeMessageType,
-            payload: snapshot,
-          });
-          sendResponse({ success: true, message: `Scanned product: ${snapshot.title}` });
-          return true;
-        }
-      }
-      sendResponse({ success: false, message: 'No supported workflow content detected on current tab.' });
-      return true;
-    }
-
-    sendResponse({ success: false, error: `Unrecognized command: ${command}` });
-    return true;
+    
+    // Delegate to active plugin
+    pluginRegistry.handleCommand(command, value as Record<string, unknown> || {})
+      .then(result => sendResponse(result))
+      .catch(err => sendResponse({ success: false, error: String(err) }));
+    
+    return true; // Async response
   }
 });
 
-bootWorkflows().catch(console.error);
+// Handle workflow toggle updates from popup
+chrome.storage.onChanged.addListener((changes, area) => {
+  if (area === 'local' && changes.workflows) {
+    console.log('[VibeCore ContentScript] Workflow toggles changed, reactivating plugins');
+    pluginRegistry.unmountAll().then(() => pluginRegistry.activateForCurrentHost());
+  }
+});
+
+bootPluginRegistry().catch(console.error);

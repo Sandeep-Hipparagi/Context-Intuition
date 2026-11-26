@@ -203,3 +203,6 @@ export class GroceryTrackerWorkflow {
     return document.querySelector('#add-to-cart-button, button[name*="add-to-cart" i], button[data-testid="add-to-cart"]');
   }
 }
+
+// Make globally accessible for plugin registry
+(window as any).__groceryWorkflow = new GroceryTrackerWorkflow();

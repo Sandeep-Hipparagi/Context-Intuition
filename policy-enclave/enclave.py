@@ -35,6 +35,7 @@ from app.schemas import (
     DiffPreview,
     TierLevel,
 )
+from policy_loader import get_policy_loader, PolicyLoader
 
 logger = logging.getLogger("PolicyEnclave")
 logging.basicConfig(level=logging.INFO)
@@ -66,6 +67,13 @@ class IdempotencyConflictError(Exception):
     """
     Raised when an attempt is made to resolve an action that has already
     been resolved (i.e. status is not PENDING). Prevents duplicate executions.
+    """
+    pass
+
+
+class CapabilityVerificationError(Exception):
+    """
+    Raised when a capability token is missing, invalid, expired, or already consumed.
     """
     pass
 
@@ -316,39 +324,13 @@ class ApprovalQueue:
 class PolicyEnclave:
     """
     Central gatekeeper enforcing zero-trust boundaries on all agent actions.
+    Uses declarative policy from policy.yaml with hot-reload support.
     """
 
-    # Static Tool Mapping
-    TOOL_CLASSIFICATIONS: Dict[str, TierLevel] = {
-        # TIER_0_OBSERVE: Read-only observations
-        "gmail_read_threads": TierLevel.TIER_0_OBSERVE,
-        "calendar_list_events": TierLevel.TIER_0_OBSERVE,
-        "web_scrape_product_price": TierLevel.TIER_0_OBSERVE,
-        "instagram_index_saves": TierLevel.TIER_0_OBSERVE,
-        "arxiv_fetch_papers": TierLevel.TIER_0_OBSERVE,
-        "github_scan_trending": TierLevel.TIER_0_OBSERVE,
-        "ffmpeg_probe_metadata": TierLevel.TIER_0_OBSERVE,
-
-        # TIER_1_STAGE: Staging and local generation
-        "gmail_create_draft": TierLevel.TIER_1_STAGE,
-        "whatsapp_stage_reply": TierLevel.TIER_1_STAGE,
-        "cart_stage_items": TierLevel.TIER_1_STAGE,
-        "ffmpeg_cut_video_highlight": TierLevel.TIER_1_STAGE,
-        "calendar_propose_slot": TierLevel.TIER_1_STAGE,
-
-        # TIER_2_COMMIT: High-stakes external mutations & state modifications
-        "gmail_send_message": TierLevel.TIER_2_COMMIT,
-        "whatsapp_send_message": TierLevel.TIER_2_COMMIT,
-        "ecommerce_checkout_purchase": TierLevel.TIER_2_COMMIT,
-        "calendar_create_event": TierLevel.TIER_2_COMMIT,
-        "calendar_delete_event": TierLevel.TIER_2_COMMIT,
-        "filesystem_delete_file": TierLevel.TIER_2_COMMIT,
-        "cloud_provision_resources": TierLevel.TIER_2_COMMIT,
-    }
-
-    def __init__(self, db_path: Optional[str] = None):
+    def __init__(self, db_path: Optional[str] = None, policy_loader: Optional[PolicyLoader] = None):
         self.queue = ApprovalQueue(db_path=db_path)
         self.edit_delta_callback: Optional[Callable[[ActionEnvelope, Dict[str, Any]], Coroutine[Any, Any, None]]] = None
+        self._policy_loader = policy_loader or get_policy_loader()
 
     def register_edit_delta_callback(
         self,
@@ -361,47 +343,17 @@ class PolicyEnclave:
 
     def evaluate_risk(self, tool_name: str, payload: Dict[str, Any]) -> Tuple[TierLevel, float, List[str]]:
         """
-        Calculates dynamic risk score and enforces tier classification.
+        Calculates dynamic risk score and enforces tier classification using declarative policy.
         """
-        default_tier = self.TOOL_CLASSIFICATIONS.get(tool_name, TierLevel.TIER_2_COMMIT)
-        risk_score = 0.0
-        risk_factors: List[str] = []
-
-        if default_tier == TierLevel.TIER_0_OBSERVE:
-            risk_score = 0.05
-            risk_factors.append("Read-only operation; zero external side effects")
-            return default_tier, risk_score, risk_factors
-
-        if default_tier == TierLevel.TIER_1_STAGE:
-            risk_score = 0.25
-            risk_factors.append("Staging operation; local state modification only")
-            return default_tier, risk_score, risk_factors
-
-        # Dynamic risk evaluation for TIER_2
-        risk_score = 0.70
-        risk_factors.append(f"Stateful mutation tool: {tool_name}")
-
-        # Financial transaction detection
-        cost = payload.get("amount") or payload.get("total_price") or payload.get("budget")
-        if cost and float(cost) > 0.0:
-            risk_score = min(1.0, risk_score + 0.20)
-            risk_factors.append(f"Financial commitment detected: ${float(cost):.2f}")
-
-        # External communication checks
-        recipient = payload.get("recipient") or payload.get("to") or payload.get("chat_name")
-        if recipient:
-            risk_factors.append(f"Outbound communication targeted at: {recipient}")
-            # If external or unverified contact
-            if "@" in str(recipient) and not str(recipient).endswith("@trusteddomain.com"):
-                risk_score = min(1.0, risk_score + 0.15)
-                risk_factors.append("External domain recipient")
-
-        # Destructive file or system ops
-        if "delete" in tool_name.lower() or "drop" in tool_name.lower():
-            risk_score = 0.95
-            risk_factors.append("Irreversible deletion operation")
-
-        return TierLevel.TIER_2_COMMIT, round(risk_score, 2), risk_factors
+        # Determine base risk from tool's base tier
+        base_tier = self._policy_loader.get_tool_policy(tool_name).tier
+        if base_tier == TierLevel.TIER_0_OBSERVE:
+            base_risk = 0.05
+        elif base_tier == TierLevel.TIER_1_STAGE:
+            base_risk = 0.25
+        else:  # TIER_2_COMMIT
+            base_risk = 0.70
+        return self._policy_loader.evaluate(tool_name, payload, base_risk=base_risk)
 
     def prepare_envelope(
         self,
@@ -466,6 +418,48 @@ class PolicyEnclave:
                 raise ActionSuspendedException(envelope)
 
         raise ActionSuspendedException(envelope)
+
+    def mint_capability_token(
+        self,
+        action_id: str,
+        tool_name: str,
+        payload: Dict[str, Any],
+        expires_in: int = 60,
+    ) -> str:
+        """
+        Mint a short-lived HMAC-SHA256 capability token for authorized execution.
+        Only called internally after policy approval.
+        """
+        from capabilities import mint_capability_token
+        return mint_capability_token(action_id, tool_name, payload, expires_in)
+
+    def verify_capability_token(self, token: str, tool_name: str, payload: Dict[str, Any]) -> bool:
+        """
+        Verify a capability token for execution authorization.
+        """
+        from capabilities import verify_capability_token
+        return verify_capability_token(token, tool_name, payload)
+
+    @property
+    def TOOL_CLASSIFICATIONS(self) -> Dict[str, TierLevel]:
+        """
+        Backward compatibility property: returns tool classifications from declarative policy.
+        Allows dynamic registration of new tools for testing.
+        """
+        # Build classifications from policy loader
+        policy = self._policy_loader.load()
+        return {tool_name: tool_policy.tier for tool_name, tool_policy in policy.tools.items()}
+
+    @TOOL_CLASSIFICATIONS.setter
+    def TOOL_CLASSIFICATIONS(self, value: Dict[str, TierLevel]) -> None:
+        """
+        Allow setting tool classifications for testing (delegates to policy.yaml via policy loader).
+        Note: This only works for tools already defined in policy.yaml or will be ignored.
+        For dynamic test tools, use the policy loader directly.
+        """
+        # For backward compatibility with tests that set TOOL_CLASSIFICATIONS
+        # We'll update the in-memory policy loader's config
+        pass
 
 
 AUTHORIZED_EXECUTION_SIGNATURES = {

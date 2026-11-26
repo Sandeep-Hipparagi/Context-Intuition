@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from contextlib import asynccontextmanager
 import asyncio
+from collections import OrderedDict
 from datetime import datetime, timezone
 import hmac
 import json
@@ -50,14 +51,18 @@ from app.schemas import (
     BridgeMessageType,
     ContextNode,
     ContextNodeType,
+    ContextEvent,
+    ContextEventType,
     MorningBrief,
     TierLevel,
 )
 from app.ledger.context_graph import ContextKnowledgeGraph
 from app.ledger.edit_delta import EditDeltaEngine
 from app.agents.morning_brief import MorningBriefAgent
-from app.dispatcher import ToolDispatcher, BridgeDisconnectedError
+from app.dispatcher import ToolDispatcher, BridgeDisconnectedError, CapabilityVerificationError
+from app.tracing import get_trace_store, parse_traceparent, generate_trace_id, generate_span_id
 from enclave import get_policy_enclave, IdempotencyConflictError
+from capabilities import mint_capability_token
 
 logger = logging.getLogger("Orchestrator")
 logging.basicConfig(level=logging.INFO)
@@ -68,6 +73,30 @@ edit_delta_engine = EditDeltaEngine()
 policy_enclave = get_policy_enclave()
 tool_dispatcher = ToolDispatcher()
 scheduler = AsyncIOScheduler()
+
+# Frame deduplication: bounded LRU cache for seen frame_ids (max 10000 entries)
+class FrameDeduplicator:
+    def __init__(self, max_size: int = 10000):
+        self.max_size = max_size
+        self._seen: OrderedDict[str, None] = OrderedDict()
+
+    def check_and_add(self, frame_id: str) -> bool:
+        """
+        Returns True if frame_id is new (not seen), False if duplicate.
+        """
+        if frame_id in self._seen:
+            # Move to end (most recent)
+            self._seen.move_to_end(frame_id)
+            return False
+        self._seen[frame_id] = None
+        if len(self._seen) > self.max_size:
+            self._seen.popitem(last=False)  # Remove oldest
+        return True
+
+    def clear(self):
+        self._seen.clear()
+
+frame_deduplicator = FrameDeduplicator()
 
 
 async def run_scheduled_brief():
@@ -283,10 +312,23 @@ async def browser_bridge_endpoint(
                 }))
                 continue
 
+            # Frame deduplication: skip already-seen frame_ids
+            if not frame_deduplicator.check_and_add(message.message_id):
+                logger.debug(f"Duplicate frame_id ignored: {message.message_id}")
+                continue
+
+            # Extract trace context from message metadata for distributed tracing
+            trace_id = message.metadata.get("trace_id") if message.metadata else None
+            span_id = message.metadata.get("span_id") if message.metadata else None
+            if not trace_id:
+                trace_id = generate_trace_id()
+            if not span_id:
+                span_id = generate_span_id()
+
             if message.msg_type == BridgeMessageType.HEARTBEAT:
                 continue
 
-            logger.info(f"[BRIDGE] Received {message.msg_type} from authenticated Chrome extension")
+            logger.info(f"[BRIDGE] Received {message.msg_type} from authenticated Chrome extension [trace_id={trace_id[:8]}]")
 
             if message.msg_type == BridgeMessageType.DOM_GROCERY_SNAPSHOT:
                 title = message.payload.get("title", "Untitled Product")
@@ -305,7 +347,9 @@ async def browser_bridge_endpoint(
                         confidence=0.90,
                         source=f"grocery_tracker:{portal}",
                         tags=["grocery", "price_tracker", portal],
-                    )
+                    ),
+                    agent_id="chrome_extension",
+                    trace_id=trace_id,
                 )
                 await manager.broadcast_to_dashboards("GROCERY_PRICE_UPDATE", stored_payload)
 
@@ -328,7 +372,9 @@ async def browser_bridge_endpoint(
                         confidence=0.95,
                         source="whatsapp_web_observer",
                         tags=["whatsapp", "communication", chat_name],
-                    )
+                    ),
+                    agent_id="chrome_extension",
+                    trace_id=trace_id,
                 )
                 await manager.broadcast_to_dashboards("NEW_WHATSAPP_MESSAGE", stored_payload)
 
@@ -355,7 +401,9 @@ async def browser_bridge_endpoint(
                             confidence=0.85,
                             source="instagram_archivist",
                             tags=["instagram", "saved_post", author],
-                        )
+                        ),
+                        agent_id="chrome_extension",
+                        trace_id=trace_id,
                     )
                 await manager.broadcast_to_dashboards("INSTAGRAM_BATCH_INDEXED", {"count": len(items)})
 
@@ -365,6 +413,16 @@ async def browser_bridge_endpoint(
                 if "title" in stored_payload:
                     stored_payload["sanitized_title"] = sanitize_dom_payload(stored_payload["title"])
                 await manager.broadcast_to_dashboards("PRICE_SNAPSHOT", stored_payload)
+
+            elif message.msg_type == BridgeMessageType.SELECTOR_CANARY_WARNING:
+                # Handle DOM canary warning from plugin registry
+                payload = message.payload
+                logger.warning(
+                    f"[CANARY_WARNING] Plugin '{payload.get('pluginName')}' ({payload.get('pluginId')}) "
+                    f"missing selectors on {payload.get('url')}: {payload.get('missingSelectors')}"
+                )
+                # Broadcast to dashboards for non-intrusive health alert
+                await manager.broadcast_to_dashboards("SELECTOR_CANARY_WARNING", payload)
 
     except WebSocketDisconnect:
         manager.disconnect_browser(websocket)
@@ -416,10 +474,11 @@ async def health_check():
     return {
         "status": "healthy",
         "timestamp": datetime.now(timezone.utc).isoformat(),
-        "version": "0.1.0",
+        "version": "0.3.0",
         "scheduler_running": scheduler.running,
         "browser_bridges_connected": len(manager.browser_bridges),
         "dashboard_clients_connected": len(manager.dashboard_clients),
+        "profile": settings.PROFILE,
     }
 
 
@@ -452,7 +511,7 @@ async def resolve_approval(action_id: str, request: ResolveActionRequest):
     """
     Approves, Rejects, or Approves with Edits a staged Tier-2 action.
     Enforces atomic idempotency via database claim to prevent TOCTOU double-execution.
-    Dispatches approved actions to ToolDispatcher.
+    Dispatches approved actions to ToolDispatcher with capability token.
     Triggers the Edit-Delta Learning Engine if the payload was edited.
     """
     if request.status in (ApprovalStatus.APPROVED, ApprovalStatus.EDITED):
@@ -474,17 +533,32 @@ async def resolve_approval(action_id: str, request: ResolveActionRequest):
         if request.status == ApprovalStatus.EDITED and request.edited_payload:
             await edit_delta_engine.learn_from_edit(envelope, request.edited_payload)
 
-        # Dispatch the finalized payload to the registered execution handler with verified envelope_id
+        # Mint capability token for authorized execution
+        capability_token = mint_capability_token(
+            action_id=action_id,
+            tool_name=envelope.tool_name,
+            payload=final_payload,
+            expires_in=60,  # 60 second TTL
+            profile=settings.PROFILE,
+        )
+
+        # Dispatch the finalized payload to the registered execution handler with verified envelope_id and capability token
         try:
             execution_result = await tool_dispatcher.dispatch(
                 envelope.tool_name,
                 final_payload,
                 envelope_id=action_id,
+                capability_token=capability_token,
             )
         except BridgeDisconnectedError as e:
             # Recoverable browser disconnection: revert action back to PENDING state
             policy_enclave.queue.revert_to_pending(action_id)
             raise HTTPException(status_code=503, detail=str(e))
+        except CapabilityVerificationError as e:
+            # Capability token verification failed - this should not happen for freshly minted tokens
+            logger.error(f"Capability verification failed for {action_id}: {e}")
+            policy_enclave.queue.revert_to_pending(action_id)
+            raise HTTPException(status_code=500, detail=f"Capability verification failed: {str(e)}")
         except Exception as e:
             logger.error(f"Execution error dispatching tool {envelope.tool_name}: {e}")
             policy_enclave.queue.revert_to_pending(action_id)
@@ -552,3 +626,83 @@ async def query_context_nodes(
 ):
     nodes = context_graph.find_nodes(node_type=node_type, tag=tag)
     return [n.model_dump(mode="json") for n in nodes]
+
+
+# ============================================================================
+# Event-Sourced Context Graph Inspection Endpoints
+# ============================================================================
+
+@app.get("/api/context/nodes/{node_id}/history")
+async def get_node_history(node_id: str):
+    """
+    Returns the chronological causal chain of mutations for a node.
+    Immutable event log - never modified after creation.
+    """
+    events = context_graph.get_node_history(node_id)
+    return [e.model_dump(mode="json") for e in events]
+
+
+@app.get("/api/context/replay")
+async def replay_context_graph(as_of: str = Query(..., description="ISO8601 timestamp to replay state to")):
+    """
+    Reconstructs the exact materialized graph state as it existed at a historical timestamp.
+    Replays all events chronologically up to the given timestamp without mutating live tables.
+    """
+    try:
+        as_of_dt = datetime.fromisoformat(as_of.replace("Z", "+00:00"))
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid timestamp format. Use ISO8601 (e.g., 2024-01-15T10:30:00Z)")
+    
+    nodes = context_graph.replay_until(as_of_dt)
+    return [n.model_dump(mode="json") for n in nodes]
+
+
+@app.get("/api/context/search")
+async def search_context(
+    q: str = Query(..., min_length=1, description="Search query"),
+    limit: int = Query(10, ge=1, le=50),
+    semantic_weight: float = Query(0.6, ge=0.0, le=1.0),
+    node_type: Optional[ContextNodeType] = Query(None),
+    tag: Optional[str] = Query(None),
+):
+    """
+    Hybrid semantic + temporal search over the context graph.
+    
+    Combines cosine similarity of query embedding with node embeddings
+    and normalized temporal decayed relevance.
+    
+    hybrid_score = semantic_weight * semantic_similarity + (1 - semantic_weight) * normalized_decayed_relevance
+    """
+    results = context_graph.search_hybrid(
+        query=q,
+        limit=limit,
+        semantic_weight=semantic_weight,
+        node_type=node_type,
+        tag=tag,
+    )
+    return [
+        {"node": node.model_dump(mode="json"), "score": score}
+        for node, score in results
+    ]
+
+
+# ============================================================================
+# Distributed Tracing Endpoints
+# ============================================================================
+
+@app.get("/api/traces/recent")
+async def get_recent_traces(limit: int = Query(100, ge=1, le=500)):
+    """Get recent trace summaries (one per trace_id)."""
+    trace_store = get_trace_store()
+    traces = trace_store.get_recent_traces(limit=limit)
+    return traces
+
+
+@app.get("/api/traces/{trace_id}")
+async def get_trace(trace_id: str):
+    """Get all spans for a trace_id, ordered by start time (W3C trace waterfall)."""
+    trace_store = get_trace_store()
+    spans = trace_store.get_trace(trace_id)
+    if not spans:
+        raise HTTPException(status_code=404, detail=f"Trace {trace_id} not found")
+    return [span.__dict__ for span in spans]

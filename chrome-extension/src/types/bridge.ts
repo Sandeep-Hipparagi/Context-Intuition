@@ -18,6 +18,7 @@ export type BridgeMessageType =
   | 'DOM_GROCERY_SNAPSHOT'
   | 'WHATSAPP_INCOMING_MESSAGE'
   | 'INSTAGRAM_SAVED_BATCH'
+  | 'SELECTOR_CANARY_WARNING'
   | 'ERROR';
 
 export interface DiffPreview {
@@ -43,6 +44,13 @@ export interface ActionEnvelope {
   user_signature?: string;
   user_feedback?: string;
   execution_result?: Record<string, unknown>;
+  trace_id?: string;
+  span_id?: string;
+}
+
+export interface BridgeMessageMetadata {
+  trace_id?: string;
+  span_id?: string;
 }
 
 export interface BridgeMessage {
@@ -52,6 +60,7 @@ export interface BridgeMessage {
   url?: string;
   payload: Record<string, unknown>;
   timestamp: string;
+  metadata?: BridgeMessageMetadata;
 }
 
 export interface GroceryProductSnapshot {
@@ -87,4 +96,50 @@ export interface WorkflowToggles {
   whatsapp_copilot: boolean;
   grocery_tracker: boolean;
   instagram_archivist: boolean;
+}
+
+export interface CanaryWarningPayload {
+  pluginId: string;
+  pluginName: string;
+  missingSelectors: string[];
+  url: string;
+  timestamp: string;
+  trace_id: string;
+}
+
+/**
+ * Generate a 32-hex-char W3C-compatible trace_id
+ */
+export function generateTraceId(): string {
+  const bytes = new Uint8Array(16);
+  crypto.getRandomValues(bytes);
+  return Array.from(bytes, b => b.toString(16).padStart(2, '0')).join('');
+}
+
+/**
+ * Generate a 16-hex-char W3C-compatible span_id
+ */
+export function generateSpanId(): string {
+  const bytes = new Uint8Array(8);
+  crypto.getRandomValues(bytes);
+  return Array.from(bytes, b => b.toString(16).padStart(2, '0')).join('');
+}
+
+/**
+ * Format W3C traceparent header: version-trace-id-parent-id-flags
+ */
+export function formatTraceparent(traceId: string, spanId: string, flags: string = '01'): string {
+  return `00-${traceId}-${spanId}-${flags}`;
+}
+
+/**
+ * Parse W3C traceparent header
+ */
+export function parseTraceparent(header: string): { traceId: string; parentSpanId: string; flags: string } | null {
+  if (!header) return null;
+  const parts = header.split('-');
+  if (parts.length !== 4) return null;
+  const [version, traceId, parentId, flags] = parts;
+  if (version !== '00' || traceId.length !== 32 || parentId.length !== 16) return null;
+  return { traceId, parentSpanId: parentId, flags };
 }

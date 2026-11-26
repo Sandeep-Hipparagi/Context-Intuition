@@ -2,16 +2,26 @@
  * Manifest V3 Background Service Worker for VibeCore.
  * Author: Sandeep Hipparagi (https://github.com/Sandeep-Hipparagi)
  * Maintains persistent bidirectional WebSocket bridge to local Python orchestrator.
+ * Includes IndexedDB offline write-ahead queue for telemetry durability.
  */
 
 import { BridgeMessage, BridgeMessageType } from '../types/bridge';
+import {
+  enqueueFrame,
+  getAllFrames,
+  deleteFrame,
+  updateFrameRetry,
+  getQueueSize,
+} from './offline_queue';
 
 const WS_BASE_URL = 'ws://127.0.0.1:8000/ws/browser-bridge';
 let socket: WebSocket | null = null;
 let reconnectTimer: number | null = null;
 let heartbeatTimer: number | null = null;
+let flushTimer: number | null = null;
 let reconnectAttempts = 0;
 let connectionStatus: 'CONNECTED' | 'DISCONNECTED' | 'AUTH_ERROR' = 'DISCONNECTED';
+let isFlushing = false;
 
 console.log('[VibeCore ServiceWorker] Initializing background bridge...');
 
@@ -60,6 +70,8 @@ async function connectWebSocket(): Promise<void> {
     });
 
     startHeartbeat();
+    startFlushTimer();
+    flushOfflineQueue().catch(console.error);
   };
 
   socket.onmessage = async (event: MessageEvent) => {
@@ -81,6 +93,7 @@ async function connectWebSocket(): Promise<void> {
     console.warn('[VibeCore ServiceWorker] WebSocket connection closed. Code:', event.code);
     connectionStatus = event.code === 1008 ? 'AUTH_ERROR' : 'DISCONNECTED';
     stopHeartbeat();
+    stopFlushTimer();
     scheduleReconnect();
   };
 
@@ -121,11 +134,54 @@ function stopHeartbeat(): void {
   }
 }
 
-export function sendToOrchestrator(msg: BridgeMessage): void {
+function startFlushTimer(): void {
+  stopFlushTimer();
+  flushTimer = setInterval(() => {
+    if (socket && socket.readyState === WebSocket.OPEN && !isFlushing) {
+      flushOfflineQueue().catch(console.error);
+    }
+  }, 5000) as unknown as number;
+}
+
+function stopFlushTimer(): void {
+  if (flushTimer) {
+    clearInterval(flushTimer);
+    flushTimer = null;
+  }
+}
+
+async function flushOfflineQueue(): Promise<void> {
+  if (isFlushing || !socket || socket.readyState !== WebSocket.OPEN) return;
+
+  isFlushing = true;
+  try {
+    const frames = await getAllFrames();
+    if (frames.length === 0) return;
+
+    console.log(`[VibeCore ServiceWorker] Flushing ${frames.length} queued frames...`);
+
+    for (const frame of frames) {
+      if (socket.readyState !== WebSocket.OPEN) break;
+
+      try {
+        socket.send(JSON.stringify(frame.message));
+        await deleteFrame(frame.id!);
+      } catch (err) {
+        console.error('[VibeCore ServiceWorker] Failed to flush frame:', err);
+        await updateFrameRetry(frame.id!, frame.retry_count + 1);
+      }
+    }
+  } finally {
+    isFlushing = false;
+  }
+}
+
+export async function sendToOrchestrator(msg: BridgeMessage): Promise<void> {
   if (socket && socket.readyState === WebSocket.OPEN) {
     socket.send(JSON.stringify(msg));
   } else {
-    console.warn('[VibeCore ServiceWorker] Socket not open; dropping payload:', msg.msg_type);
+    console.warn('[VibeCore ServiceWorker] Socket not open; queueing payload:', msg.msg_type);
+    await enqueueFrame(msg);
   }
 }
 
@@ -249,13 +305,19 @@ async function handleExecuteCommand(msg: BridgeMessage): Promise<void> {
 // Internal communication listener
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.source === 'vibecore-content-script') {
+    // Propagate trace context from content script to orchestrator
+    const metadata = message.metadata || {};
     sendToOrchestrator({
       message_id: crypto.randomUUID(),
       msg_type: message.msg_type as BridgeMessageType,
       tab_id: sender.tab?.id,
       url: sender.tab?.url,
       payload: message.payload,
-      timestamp: new Date().toISOString()
+      timestamp: new Date().toISOString(),
+      metadata: {
+        trace_id: metadata.trace_id,
+        span_id: metadata.span_id,
+      },
     });
   } else if (message.source === 'vibecore-popup') {
     if (message.type === 'GET_STATUS') {

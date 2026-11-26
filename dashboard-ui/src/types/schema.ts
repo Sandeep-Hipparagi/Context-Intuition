@@ -16,6 +16,14 @@ export type ContextNodeType =
   | 'TRAJECTORY'
   | 'DECISION_HISTORY';
 
+export type ContextEventType =
+  | 'NODE_CREATED'
+  | 'NODE_UPDATED'
+  | 'CONFIDENCE_REINFORCED'
+  | 'DECAY_APPLIED'
+  | 'CONSOLIDATED_INTO_TRAJECTORY'
+  | 'NODE_PRUNED';
+
 export interface ContextNode {
   node_id: string;
   node_type: ContextNodeType;
@@ -29,6 +37,16 @@ export interface ContextNode {
   updated_at: string;
   source: string;
   tags: string[];
+}
+
+export interface ContextEvent {
+  event_id: string;
+  node_id: string;
+  event_type: ContextEventType;
+  delta_payload: Record<string, unknown>;
+  agent_id?: string;
+  trace_id?: string;
+  created_at: string;
 }
 
 export interface BehavioralRule {
@@ -68,6 +86,28 @@ export interface ActionEnvelope {
   user_signature?: string;
   user_feedback?: string;
   execution_result?: Record<string, unknown>;
+  trace_id?: string;
+  span_id?: string;
+}
+
+export interface TraceSpan {
+  trace_id: string;
+  span_id: string;
+  parent_span_id?: string;
+  component: string;
+  operation: string;
+  status: string;
+  duration_ms?: number;
+  attributes: Record<string, unknown>;
+  started_at: string;
+}
+
+export interface TraceSummary {
+  trace_id: string;
+  started_at: string;
+  span_count: number;
+  max_duration_ms?: number;
+  components: string[];
 }
 
 export interface CommitmentItem {
@@ -106,4 +146,13 @@ export interface MorningBrief {
   pending_approvals: ActionEnvelope[];
   tech_radar: TechRadarItem[];
   subscription_alerts: string[];
+}
+
+export interface CanaryWarningPayload {
+  pluginId: string;
+  pluginName: string;
+  missingSelectors: string[];
+  url: string;
+  timestamp: string;
+  trace_id: string;
 }

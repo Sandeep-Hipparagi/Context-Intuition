@@ -1,6 +1,6 @@
 {
   "name": "vibecore-chrome-bridge",
-  "version": "0.1.0",
+  "version": "0.3.0",
   "description": "Authenticated browser session bridge for VibeCore personal agent swarm",
   "author": "Sandeep Hipparagi (https://github.com/Sandeep-Hipparagi)",
   "license": "Apache-2.0",

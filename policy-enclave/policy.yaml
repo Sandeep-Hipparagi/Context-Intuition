@@ -1,0 +1,153 @@
+# VibeCore Declarative Policy-as-Code
+# Author: Sandeep Hipparagi (https://github.com/Sandeep-Hipparagi)
+#
+# This file defines the zero-trust policy for all agent tool executions.
+# Override via VIBECORE_POLICY_PATH environment variable.
+# Hot-reloaded on file modification (mtime check).
+
+# Global settings
+default_tier: "TIER_2_COMMIT"  # Fallback for unconfigured tools
+hot_reload: true
+
+# Tool classifications with conditional overrides
+tools:
+  # TIER_0_OBSERVE: Read-only observations
+  gmail_read_threads:
+    tier: "TIER_0_OBSERVE"
+    description: "Read Gmail threads"
+
+  calendar_list_events:
+    tier: "TIER_0_OBSERVE"
+    description: "List calendar events"
+
+  web_scrape_product_price:
+    tier: "TIER_0_OBSERVE"
+    description: "Scrape product prices"
+
+  instagram_index_saves:
+    tier: "TIER_0_OBSERVE"
+    description: "Index Instagram saved posts"
+
+  arxiv_fetch_papers:
+    tier: "TIER_0_OBSERVE"
+    description: "Fetch arXiv papers"
+
+  github_scan_trending:
+    tier: "TIER_0_OBSERVE"
+    description: "Scan GitHub trending"
+
+  ffmpeg_probe_metadata:
+    tier: "TIER_0_OBSERVE"
+    description: "Probe video metadata"
+
+  # TIER_1_STAGE: Staging and local generation
+  gmail_create_draft:
+    tier: "TIER_1_STAGE"
+    description: "Create Gmail draft"
+
+  whatsapp_stage_reply:
+    tier: "TIER_1_STAGE"
+    description: "Stage WhatsApp reply"
+
+  cart_stage_items:
+    tier: "TIER_1_STAGE"
+    description: "Stage items in cart"
+
+  ffmpeg_cut_video_highlight:
+    tier: "TIER_1_STAGE"
+    description: "Cut video highlight"
+
+  calendar_propose_slot:
+    tier: "TIER_1_STAGE"
+    description: "Propose calendar slot"
+
+  # TIER_2_COMMIT: High-stakes external mutations
+  gmail_send_message:
+    tier: "TIER_2_COMMIT"
+    description: "Send Gmail message"
+    conditions:
+      - type: "recipient_domain"
+        allowlist:
+          - "company.internal"
+          - "team.internal"
+        allowlist_tier: "TIER_1_STAGE"  # Internal domains only need TIER_1
+      - type: "financial_threshold"
+        field: "amount"
+        threshold: 0
+        above_threshold_tier: "TIER_2_COMMIT"
+        risk_boost: 0.2
+
+  whatsapp_send_message:
+    tier: "TIER_2_COMMIT"
+    description: "Send WhatsApp message"
+    conditions:
+      - type: "recipient_domain"
+        allowlist: []  # No allowlist for WhatsApp
+        allowlist_tier: "TIER_2_COMMIT"
+
+  ecommerce_checkout_purchase:
+    tier: "TIER_2_COMMIT"
+    description: "Execute e-commerce purchase"
+    conditions:
+      - type: "financial_threshold"
+        field: "amount"
+        threshold: 50.0
+        above_threshold_tier: "TIER_2_COMMIT"
+        risk_boost: 0.3
+      - type: "financial_threshold"
+        field: "total_price"
+        threshold: 50.0
+        above_threshold_tier: "TIER_2_COMMIT"
+        risk_boost: 0.3
+
+  calendar_create_event:
+    tier: "TIER_2_COMMIT"
+    description: "Create calendar event"
+
+  calendar_delete_event:
+    tier: "TIER_2_COMMIT"
+    description: "Delete calendar event"
+
+  filesystem_delete_file:
+    tier: "TIER_2_COMMIT"
+    description: "Delete file from filesystem"
+    conditions:
+      - type: "allowed_roots"
+        paths:
+          - "staged_clips"
+          - "exports"
+          - "temp"
+        deny_traversal: true
+
+  cloud_provision_resources:
+    tier: "TIER_2_COMMIT"
+    description: "Provision cloud resources"
+    conditions:
+      - type: "financial_threshold"
+        field: "estimated_cost"
+        threshold: 10.0
+        above_threshold_tier: "TIER_2_COMMIT"
+        risk_boost: 0.4
+
+# Domain allowlists for conditional tier overrides
+domain_allowlists:
+  internal:
+    - "company.internal"
+    - "team.internal"
+    - "corp.internal"
+  trusted_partners:
+    - "partner.org"
+    - "vendor.com"
+
+# Financial thresholds (USD)
+financial_thresholds:
+  low_risk: 10.0
+  medium_risk: 50.0
+  high_risk: 100.0
+  critical_risk: 1000.0
+
+# Allowed sandbox roots for filesystem operations (relative to VIBECORE_HOME)
+sandbox_roots:
+  - "staged_clips"
+  - "exports"
+  - "temp"

@@ -3,7 +3,7 @@
  * Author: Sandeep Hipparagi (https://github.com/Sandeep-Hipparagi)
  */
 
-import { ActionEnvelope, ApprovalStatus, BehavioralRule, ContextNode, MorningBrief } from '../types/schema';
+import { ActionEnvelope, ApprovalStatus, BehavioralRule, ContextNode, MorningBrief, ContextEvent, TraceSpan, TraceSummary } from '../types/schema';
 
 export const API_BASE = 'http://127.0.0.1:8000';
 export const WS_BASE = 'ws://127.0.0.1:8000';
@@ -81,6 +81,78 @@ export async function fetchContextNodes(nodeType?: string, tag?: string): Promis
 export async function fetchBehavioralRules(): Promise<BehavioralRule[]> {
   const res = await fetch(`${API_BASE}/api/context/rules`);
   if (!res.ok) throw new Error('Failed to fetch behavioral rules');
+  return res.json();
+}
+
+export interface HealthResponse {
+  status: string;
+  timestamp: string;
+  version: string;
+  scheduler_running: boolean;
+  browser_bridges_connected: number;
+  dashboard_clients_connected: number;
+  profile: string;
+}
+
+export async function fetchHealth(): Promise<HealthResponse | null> {
+  const res = await fetch(`${API_BASE}/api/health`);
+  if (!res.ok) return null;
+  return res.json();
+}
+
+// ============================================================================
+// Context Graph History & Replay
+// ============================================================================
+
+export async function fetchNodeHistory(nodeId: string): Promise<ContextEvent[]> {
+  const res = await fetch(`${API_BASE}/api/context/nodes/${nodeId}/history`);
+  if (!res.ok) throw new Error('Failed to fetch node history');
+  return res.json();
+}
+
+export async function replayContextGraph(asOf: string): Promise<ContextNode[]> {
+  const res = await fetch(`${API_BASE}/api/context/replay?as_of=${encodeURIComponent(asOf)}`);
+  if (!res.ok) throw new Error('Failed to replay context graph');
+  return res.json();
+}
+
+export interface SearchResult {
+  node: ContextNode;
+  score: number;
+}
+
+export async function searchContext(
+  q: string,
+  limit: number = 10,
+  semanticWeight: number = 0.6,
+  nodeType?: string,
+  tag?: string
+): Promise<SearchResult[]> {
+  const params = new URLSearchParams();
+  params.append('q', q);
+  params.append('limit', limit.toString());
+  params.append('semantic_weight', semanticWeight.toString());
+  if (nodeType) params.append('node_type', nodeType);
+  if (tag) params.append('tag', tag);
+
+  const res = await fetch(`${API_BASE}/api/context/search?${params.toString()}`);
+  if (!res.ok) throw new Error('Failed to search context');
+  return res.json();
+}
+
+// ============================================================================
+// Distributed Tracing
+// ============================================================================
+
+export async function fetchRecentTraces(limit: number = 100): Promise<TraceSummary[]> {
+  const res = await fetch(`${API_BASE}/api/traces/recent?limit=${limit}`);
+  if (!res.ok) throw new Error('Failed to fetch recent traces');
+  return res.json();
+}
+
+export async function fetchTrace(traceId: string): Promise<TraceSpan[]> {
+  const res = await fetch(`${API_BASE}/api/traces/${traceId}`);
+  if (!res.ok) throw new Error('Failed to fetch trace');
   return res.json();
 }
 

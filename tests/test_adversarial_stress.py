@@ -232,6 +232,10 @@ async def test_vector3_path_traversal_file_delete_rejected():
     enclave.queue.enqueue(env)
     enclave.queue.claim_for_execution(env.action_id)
 
+    # Mint capability token for the original payload
+    from capabilities import mint_capability_token
+    from app.config import settings
+
     traversal_paths = [
         "../../../etc/passwd",
         "../../Windows/System32/drivers/etc/hosts",
@@ -240,11 +244,18 @@ async def test_vector3_path_traversal_file_delete_rejected():
     ]
 
     for bad_path in traversal_paths:
+        capability_token = mint_capability_token(
+            action_id=env.action_id,
+            tool_name="file_delete",
+            payload={"file_path": bad_path},
+            profile=settings.PROFILE,
+        )
         with pytest.raises(PermissionError) as exc_info:
             await dispatcher.dispatch(
                 "file_delete",
                 {"file_path": bad_path},
                 envelope_id=env.action_id,
+                capability_token=capability_token,
             )
         assert "Path traversal violation" in str(exc_info.value)
 

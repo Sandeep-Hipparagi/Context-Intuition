@@ -151,13 +151,13 @@ class EditDeltaEngine:
             created_at=datetime.now(timezone.utc),
         )
 
-        self._save_or_reinforce_rule(rule)
+        final_rule = self._save_or_reinforce_rule(rule)
         logger.info(
-            f" [EDIT-DELTA] Synthesized new BehavioralRule {rule.rule_id} for '{trigger}': {action_directive}"
+            f" [EDIT-DELTA] Synthesized new BehavioralRule {final_rule.rule_id} for '{trigger}': {action_directive}"
         )
-        return rule
+        return final_rule
 
-    def _save_or_reinforce_rule(self, rule: BehavioralRule) -> None:
+    def _save_or_reinforce_rule(self, rule: BehavioralRule) -> BehavioralRule:
         with self._get_connection() as conn:
             # Check if similar trigger exists to reinforce weight
             cursor = conn.cursor()
@@ -183,6 +183,20 @@ class EditDeltaEngine:
                         rule_id,
                     ),
                 )
+                # Return the existing rule with updated values
+                return BehavioralRule(
+                    rule_id=rule_id,
+                    category=rule.category,
+                    trigger_pattern=rule.trigger_pattern,
+                    action_directive=rule.action_directive,
+                    original_draft_sample=rule.original_draft_sample,
+                    user_revised_sample=rule.user_revised_sample,
+                    inferred_delta_rationale=rule.inferred_delta_rationale,
+                    weight=min(5.0, current_weight + 0.5),
+                    reinforcement_count=count + 1,
+                    created_at=rule.created_at,
+                    last_triggered_at=datetime.now(timezone.utc),
+                )
             else:
                 conn.execute(
                     """
@@ -207,7 +221,8 @@ class EditDeltaEngine:
                         datetime.now(timezone.utc).isoformat(),
                     ),
                 )
-            conn.commit()
+                conn.commit()
+                return rule
 
     def get_applicable_rules(self, category: Optional[BehavioralCategory] = None) -> List[BehavioralRule]:
         with self._get_connection() as conn:

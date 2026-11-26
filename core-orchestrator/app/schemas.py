@@ -61,6 +61,29 @@ class ContextEdge(BaseModel):
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
+class ContextEventType(str, Enum):
+    NODE_CREATED = "NODE_CREATED"
+    NODE_UPDATED = "NODE_UPDATED"
+    CONFIDENCE_REINFORCED = "CONFIDENCE_REINFORCED"
+    DECAY_APPLIED = "DECAY_APPLIED"
+    CONSOLIDATED_INTO_TRAJECTORY = "CONSOLIDATED_INTO_TRAJECTORY"
+    NODE_PRUNED = "NODE_PRUNED"
+
+
+class ContextEvent(BaseModel):
+    """
+    Immutable event record for event-sourced ContextKnowledgeGraph.
+    Every mutation to the graph is recorded as an event for audit and time-travel.
+    """
+    event_id: str = Field(default_factory=lambda: str(uuid4()))
+    node_id: str
+    event_type: ContextEventType
+    delta_payload: Dict[str, Any] = Field(default_factory=dict, description="The change that was applied")
+    agent_id: Optional[str] = Field(default=None, description="Agent that triggered this event")
+    trace_id: Optional[str] = Field(default=None, description="W3C traceparent trace_id for distributed tracing")
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
 class ContextNode(BaseModel):
     """
     Atom of the longitudinal state ledger. Stores facts, evolving preferences,
@@ -154,6 +177,8 @@ class ActionEnvelope(BaseModel):
     user_signature: Optional[str] = Field(default=None, description="Cryptographic signature or token approving action")
     user_feedback: Optional[str] = Field(default=None, description="Optional user corrections or instructions")
     execution_result: Optional[Dict[str, Any]] = Field(default=None, description="Telemetry/output from post-approval execution")
+    trace_id: Optional[str] = Field(default=None, description="W3C traceparent trace_id for end-to-end distributed tracing")
+    span_id: Optional[str] = Field(default=None, description="W3C traceparent span_id for this operation")
 
 
 # ============================================================================
@@ -181,6 +206,7 @@ class BridgeMessage(BaseModel):
     url: Optional[str] = None
     payload: Dict[str, Any] = Field(default_factory=dict)
     timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    metadata: Optional[Dict[str, Any]] = Field(default_factory=dict, description="Optional metadata including trace_id, span_id for distributed tracing")
 
 
 # ============================================================================

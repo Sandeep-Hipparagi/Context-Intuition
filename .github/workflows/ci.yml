@@ -1,0 +1,210 @@
+# VibeCore CI Pipeline
+# Author: Sandeep Hipparagi (https://github.com/Sandeep-Hipparagi)
+
+name: CI
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+
+env:
+  VIBECORE_MOCK_LLM: "1"
+  VIBECORE_OLLAMA_URL: "http://127.0.0.1:11434/api/chat"
+  VIBECORE_FAST_MODEL: "qwen2.5:1.5b"
+  VIBECORE_REASONING_MODEL: "llama3.1:8b"
+
+jobs:
+  python-tests:
+    name: Python Tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python-version: ["3.11", "3.12"]
+      fail-fast: false
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Cache pip dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('pyproject.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Run type checking
+        run: |
+          mypy core-orchestrator/app --ignore-missing-imports || true
+
+      - name: Run linting
+        run: |
+          ruff check core-orchestrator/app || true
+
+      - name: Run pytest
+        run: |
+          pytest tests/ -v --tb=short
+
+  chrome-extension-build:
+    name: Chrome Extension Build (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        node-version: ["20", "22"]
+      fail-fast: false
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js ${{ matrix.node-version }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: 'npm'
+          cache-dependency-path: chrome-extension/package-lock.json
+
+      - name: Install dependencies
+        working-directory: ./chrome-extension
+        run: npm ci
+
+      - name: TypeScript type check
+        working-directory: ./chrome-extension
+        run: npm run type-check
+
+      - name: Build extension
+        working-directory: ./chrome-extension
+        run: npm run build
+
+      - name: Verify dist output
+        working-directory: ./chrome-extension
+        run: |
+          test -f dist/service_worker.js
+          test -f dist/content_script.js
+          test -f dist/popup.js
+          test -f dist/popup.html
+          test -f dist/popup.css
+          test -f dist/manifest.json
+
+  dashboard-ui-build:
+    name: Dashboard UI Build (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        node-version: ["20", "22"]
+      fail-fast: false
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js ${{ matrix.node-version }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: 'npm'
+          cache-dependency-path: dashboard-ui/package-lock.json
+
+      - name: Install dependencies
+        working-directory: ./dashboard-ui
+        run: npm ci
+
+      - name: Build dashboard
+        working-directory: ./dashboard-ui
+        run: npm run build
+
+      - name: Verify dist output
+        working-directory: ./dashboard-ui
+        run: |
+          test -f dist/index.html
+          test -d dist/assets
+
+  security-scan:
+    name: Security Scan
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install security tools
+        run: |
+          pip install bandit safety
+
+      - name: Run bandit security linter
+        run: |
+          bandit -r core-orchestrator/app -f json -o bandit-report.json || true
+          cat bandit-report.json
+
+      - name: Run safety check
+        run: |
+          safety check --json --output safety-report.json || true
+          cat safety-report.json
+
+  hardcoded-secrets-scan:
+    name: Hardcoded Secrets Scan
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Scan for hardcoded secrets
+        run: |
+          # Check for common secret patterns
+          ! grep -r "sk_live_" --include="*.py" --include="*.ts" --include="*.json" --include="*.yaml" --include="*.yml" . || (echo "Found potential Stripe secret key" && exit 1)
+          ! grep -r "sk_test_" --include="*.py" --include="*.ts" --include="*.json" --include="*.yaml" --include="*.yml" . || (echo "Found potential Stripe test key" && exit 1)
+          ! grep -r "ghp_" --include="*.py" --include="*.ts" --include="*.json" --include="*.yaml" --include="*.yml" . || (echo "Found potential GitHub token" && exit 1)
+          ! grep -r "api_key.*=" --include="*.py" --include="*.ts" --include="*.json" --include="*.yaml" --include="*.yml" . | grep -v "os.environ\|settings\." || (echo "Found potential hardcoded API key" && exit 1)
+          ! grep -r "password.*=" --include="*.py" --include="*.ts" --include="*.json" --include="*.yaml" --include="*.yml" . | grep -v "os.environ\|settings\." || (echo "Found potential hardcoded password" && exit 1)
+          echo "No hardcoded secrets detected"
+
+  hardcoded-paths-scan:
+    name: Hardcoded Paths Scan
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Scan for hardcoded absolute paths
+        run: |
+          # Check for hardcoded /home/, /Users/, C:\\ paths in source (excluding tests and docs)
+          ! grep -r "/home/" --include="*.py" --include="*.ts" core-orchestrator/ chrome-extension/src/ dashboard-ui/src/ | grep -v "test\|\.md\|os.path.expanduser\|Path.home" || (echo "Found hardcoded /home/ path" && exit 1)
+          ! grep -r "/Users/" --include="*.py" --include="*.ts" core-orchestrator/ chrome-extension/src/ dashboard-ui/src/ | grep -v "test\|\.md\|os.path.expanduser\|Path.home" || (echo "Found hardcoded /Users/ path" && exit 1)
+          ! grep -r "C:\\\\" --include="*.py" --include="*.ts" core-orchestrator/ chrome-extension/src/ dashboard-ui/src/ | grep -v "test\|\.md" || (echo "Found hardcoded C:\\ path" && exit 1)
+          echo "No hardcoded absolute paths detected"
+
+  full-verification:
+    name: Full Verification Gate
+    needs: [python-tests, chrome-extension-build, dashboard-ui-build, security-scan, hardcoded-secrets-scan, hardcoded-paths-scan]
+    runs-on: ubuntu-latest
+    if: always()
+    steps:
+      - name: Check all jobs passed
+        run: |
+          if [ "${{ needs.python-tests.result }}" != "success" ]; then echo "Python tests failed"; exit 1; fi
+          if [ "${{ needs.chrome-extension-build.result }}" != "success" ]; then echo "Chrome extension build failed"; exit 1; fi
+          if [ "${{ needs.dashboard-ui-build.result }}" != "success" ]; then echo "Dashboard UI build failed"; exit 1; fi
+          if [ "${{ needs.security-scan.result }}" != "success" ]; then echo "Security scan failed"; exit 1; fi
+          if [ "${{ needs.hardcoded-secrets-scan.result }}" != "success" ]; then echo "Secrets scan failed"; exit 1; fi
+          if [ "${{ needs.hardcoded-paths-scan.result }}" != "success" ]; then echo "Hardcoded paths scan failed"; exit 1; fi
+          echo "All verification gates passed!"

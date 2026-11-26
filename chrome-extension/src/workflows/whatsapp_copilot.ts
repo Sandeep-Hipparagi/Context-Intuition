@@ -7,7 +7,7 @@
  * Tier 2: Executes Send button click only upon signed, explicit approval frame (COMMIT_ACTION).
  */
 
-import { WhatsAppMessageSnapshot } from '../types/bridge';
+import { WhatsAppMessageSnapshot, BridgeMessageType, generateTraceId, generateSpanId, BridgeMessageMetadata } from '../types/bridge';
 
 export class WhatsAppCopilotWorkflow {
   private lastMessageId: string = '';
@@ -140,3 +140,13 @@ export class WhatsAppCopilotWorkflow {
     );
   }
 }
+
+// Make globally accessible for plugin registry
+(window as any).__whatsappWorkflow = new WhatsAppCopilotWorkflow((msg) => {
+  chrome.runtime.sendMessage({
+    source: 'vibecore-content-script',
+    msg_type: 'WHATSAPP_INCOMING_MESSAGE' as BridgeMessageType,
+    payload: msg,
+    metadata: { trace_id: generateTraceId(), span_id: generateSpanId() } as BridgeMessageMetadata,
+  });
+});

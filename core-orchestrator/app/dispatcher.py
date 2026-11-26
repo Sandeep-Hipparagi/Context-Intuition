@@ -5,6 +5,7 @@ Author: Sandeep Hipparagi (https://github.com/Sandeep-Hipparagi)
 Maintains mapping of canonical tool names to concrete async execution handlers.
 Routes browser-bound actions over WebSocket to the Chrome Extension bridge,
 and dispatches system/API actions directly.
+Enforces cryptographic capability token verification for all executions.
 """
 
 from __future__ import annotations
@@ -25,6 +26,7 @@ sys.path.insert(0, str(ROOT_DIR / "policy-enclave"))
 sys.path.insert(0, str(ROOT_DIR / "mcp-tools"))
 
 from app.schemas import BridgeMessage, BridgeMessageType
+from app.config import settings
 from gmail_tool import GmailTool
 from calendar_tool import CalendarTool
 
@@ -42,9 +44,17 @@ class BridgeDisconnectedError(Exception):
     pass
 
 
+class CapabilityVerificationError(Exception):
+    """
+    Raised when a capability token is missing, invalid, expired, or already consumed.
+    """
+    pass
+
+
 class ToolDispatcher:
     """
     Central execution dispatcher for all approved TIER_2_COMMIT actions.
+    Enforces capability token verification for every execution.
     """
 
     def __init__(self):
@@ -83,21 +93,48 @@ class ToolDispatcher:
         self.register_handler("whatsapp_send_message", self._handle_whatsapp_send)
         self.register_handler("file_delete", self._handle_file_delete)
 
+    def _verify_capability_token(
+        self,
+        tool_name: str,
+        payload: Dict[str, Any],
+        capability_token: Optional[str],
+        profile: str,
+    ) -> None:
+        """
+        Verify capability token for execution authorization.
+        Raises CapabilityVerificationError on failure.
+        """
+        if not capability_token:
+            raise CapabilityVerificationError(
+                f"Missing capability token for tool '{tool_name}'. "
+                f"Tool execution requires a valid, unexpired capability token minted by PolicyEnclave."
+            )
+
+        # Import here to avoid circular imports
+        from capabilities import verify_capability_token, CapabilityVerificationError as CapError
+
+        try:
+            verify_capability_token(capability_token, tool_name, payload, profile)
+        except CapError as e:
+            raise CapabilityVerificationError(f"Capability verification failed for '{tool_name}': {e}")
+
     async def dispatch(
         self,
         tool_name: str,
         payload: Dict[str, Any],
         envelope_id: Optional[str] = None,
+        capability_token: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Executes the registered handler for the given tool_name with the finalized payload.
-        Enforces zero-trust: TIER_2 tools cannot be executed without a verified, approved envelope.
+        Enforces zero-trust: all executions require a verified capability token.
         """
         from enclave import get_policy_enclave, ApprovalStatus, TierLevel
 
         enclave = get_policy_enclave()
-        tier = enclave.TOOL_CLASSIFICATIONS.get(tool_name, TierLevel.TIER_2_COMMIT)
+        tier = enclave._policy_loader.get_tool_tier(tool_name)
 
+        # For TIER_2 tools, require envelope_id and verify envelope status
         if tier == TierLevel.TIER_2_COMMIT:
             if not envelope_id:
                 raise PermissionError(
@@ -113,6 +150,11 @@ class ToolDispatcher:
                     f"Direct dispatch of TIER_2 tool '{tool_name}' rejected: "
                     f"ActionEnvelope '{envelope_id}' is in unauthorized status '{envelope.status.value}'."
                 )
+
+        # CRITICAL: Verify capability token for ALL executions (TIER_0, TIER_1, TIER_2)
+        # This prevents unauthorized direct calls to dispatcher
+        profile = settings.PROFILE
+        self._verify_capability_token(tool_name, payload, capability_token, profile)
 
         handler = self._handlers.get(tool_name)
         if not handler:
@@ -201,13 +243,13 @@ class ToolDispatcher:
         target_file = Path(path_str).resolve()
         vibecore_home = get_vibecore_home().resolve()
 
-        # Whitelist authorized sandbox directories
-        allowed_roots = [
-            vibecore_home,
-            vibecore_home / "staged_clips",
-            vibecore_home / "exports",
-            vibecore_home / "temp",
-        ]
+        # Get sandbox roots from policy (with fallback)
+        from policy_loader import get_policy_loader
+        policy = get_policy_loader().load()
+        sandbox_roots = policy.sandbox_roots or ["staged_clips", "exports", "temp"]
+
+        allowed_roots = [vibecore_home / root for root in sandbox_roots]
+        allowed_roots.insert(0, vibecore_home)  # Also allow vibecore home root
 
         is_safe = False
         for root in allowed_roots:

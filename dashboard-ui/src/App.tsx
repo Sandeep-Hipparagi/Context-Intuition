@@ -18,9 +18,11 @@ import {
   fetchBehavioralRules,
   resolveApprovalAction,
   triggerMorningBrief,
+  fetchHealth,
   wsClient,
   WsConnectionState,
 } from './api/client';
+import { CanaryWarningPayload } from './types/schema';
 import { TelemetryBar } from './components/TelemetryBar';
 import { MorningBriefCard } from './components/MorningBriefCard';
 import { ApprovalQueue } from './components/ApprovalQueue';
@@ -37,6 +39,8 @@ export const App: React.FC = () => {
   const [isSettingsOpen, setIsSettingsOpen] = useState<boolean>(false);
   const [liveNotification, setLiveNotification] = useState<string | null>(null);
   const [isLoadingBrief, setIsLoadingBrief] = useState<boolean>(false);
+  const [profile, setProfile] = useState<string>('default');
+  const [canaryWarning, setCanaryWarning] = useState<CanaryWarningPayload | null>(null);
 
   // Initialize data and WebSocket connection
   useEffect(() => {
@@ -64,6 +68,9 @@ export const App: React.FC = () => {
       } else if (event === 'GROCERY_PRICE_UPDATE') {
         showNotification(`Price updated: ${data.title} ($${data.unit_price})`);
         loadLedgerData();
+      } else if (event === 'SELECTOR_CANARY_WARNING') {
+        setCanaryWarning(data);
+        showNotification(`DOM Canary Warning: ${data.pluginName} missing ${data.missingSelectors.length} selector(s)`);
       }
     });
 
@@ -83,12 +90,16 @@ export const App: React.FC = () => {
 
   const loadAllData = async () => {
     try {
-      const [approvals, brief] = await Promise.all([
+      const [approvals, brief, health] = await Promise.all([
         fetchPendingApprovals().catch(() => []),
         fetchLatestMorningBrief().catch(() => null),
+        fetchHealth().catch(() => null),
       ]);
       setPendingApprovals(approvals);
       setMorningBrief(brief);
+      if (health?.profile) {
+        setProfile(health.profile);
+      }
     } catch (e) {
       console.error('Error loading primary dashboard data:', e);
     }
@@ -145,6 +156,7 @@ export const App: React.FC = () => {
         wsState={wsState}
         pendingCount={pendingApprovals.length}
         onOpenSettings={() => setIsSettingsOpen(true)}
+        profile={profile}
       />
 
       {/* Live Toast Notification Banner */}
@@ -205,6 +217,8 @@ export const App: React.FC = () => {
             nodes={contextNodes}
             rules={behavioralRules}
             onRefresh={loadLedgerData}
+            canaryWarning={canaryWarning}
+            onDismissCanary={() => setCanaryWarning(null)}
           />
         </div>
       </main>

@@ -1,14 +1,15 @@
 import React from 'react';
 import { WsConnectionState } from '../api/client';
-import { Cpu, Chrome, Settings as SettingsIcon, AlertCircle } from 'lucide-react';
+import { Cpu, Chrome, Settings as SettingsIcon, AlertCircle, UserCog } from 'lucide-react';
 
 interface TelemetryBarProps {
   wsState: WsConnectionState;
   pendingCount: number;
   onOpenSettings: () => void;
+  profile: string;
 }
 
-export const TelemetryBar: React.FC<TelemetryBarProps> = ({ wsState, pendingCount, onOpenSettings }) => {
+export const TelemetryBar: React.FC<TelemetryBarProps> = ({ wsState, pendingCount, onOpenSettings, profile }) => {
   return (
     <header className="border-b border-zinc-800 bg-zinc-950/80 backdrop-blur sticky top-0 z-30 px-6 py-3.5">
       <div className="max-w-7xl mx-auto flex items-center justify-between">
@@ -21,7 +22,7 @@ export const TelemetryBar: React.FC<TelemetryBarProps> = ({ wsState, pendingCoun
             <div className="flex items-center gap-2">
               <span className="font-bold text-base tracking-tight text-zinc-100">VibeCore</span>
               <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-zinc-800 text-zinc-400 border border-zinc-700">
-                v0.1.0-alpha
+                v0.2.0
               </span>
             </div>
             <p className="text-[11px] text-zinc-500 font-mono">Local-First Multi-Agent Runtime</p>
@@ -30,6 +31,13 @@ export const TelemetryBar: React.FC<TelemetryBarProps> = ({ wsState, pendingCoun
 
         {/* Telemetry Pills */}
         <div className="flex items-center gap-3">
+          {/* Active Profile */}
+          <div className="hidden sm:flex items-center gap-2 rounded-lg border border-zinc-800 bg-zinc-900/60 px-3 py-1.5 text-xs font-mono">
+            <UserCog className="h-3.5 w-3.5 text-purple-400" />
+            <span className="text-zinc-400">Profile:</span>
+            <span className="text-zinc-200 font-medium">{profile}</span>
+          </div>
+
           {/* Orchestrator WS State */}
           <div className="flex items-center gap-2 rounded-lg border border-zinc-800 bg-zinc-900/60 px-3 py-1.5 text-xs font-mono">
             <span

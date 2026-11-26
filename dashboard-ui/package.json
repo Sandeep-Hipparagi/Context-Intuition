@@ -1,7 +1,7 @@
 {
   "name": "vibecore-dashboard-ui",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.3.0",
   "description": "Live Personal Dashboard & Generative UI for VibeCore personal agent swarm",
   "author": "Sandeep Hipparagi (https://github.com/Sandeep-Hipparagi)",
   "license": "Apache-2.0",
