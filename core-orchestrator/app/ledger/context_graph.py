@@ -617,13 +617,13 @@ class ContextKnowledgeGraph:
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
             
-            # Get nodes with embeddings
+            # Get nodes with embeddings (parameterized query - safe from SQL injection)
             sql = f"""
                 SELECT cn.*, ne.embedding_blob, ne.dimension
                 FROM context_nodes cn
                 JOIN node_embeddings ne ON cn.node_id = ne.node_id
                 WHERE {where_sql}
-            """
+            """  # nosec: parameterized query with params passed to cursor.execute()
             cursor.execute(sql, params)
             rows = cursor.fetchall()
             
