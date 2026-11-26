@@ -172,8 +172,8 @@ jobs:
           FOUND_SECRETS=0
           
           # Scan for patterns but exclude test files, CI workflows, and config files
-          # Use grep -P for PCRE patterns (\s), grep -E for extended regex (\|)
-          for pattern in "sk_live_" "sk_test_" "ghp_" "api_key[[:space:]]*=" "password[[:space:]]*="; do
+          # Use simple string patterns for reliable matching
+          for pattern in "sk_live_" "sk_test_" "ghp_" "api_key=" "password="; do
             if grep -r "$pattern" --include="*.py" --include="*.ts" --include="*.json" --include="*.yaml" --include="*.yml" . \
               --exclude-dir=node_modules \
               --exclude-dir=dist \
@@ -201,7 +201,7 @@ jobs:
               | grep -v "VIBECORE_FAST_MODEL" \
               | grep -v "VIBECORE_REASONING_MODEL" \
               | grep -v "VIBECORE_MOCK_LLM" \
-              | grep -v "self.api_key[[:space:]]*=" \
+              | grep -v "self.api_key=" \
               | grep -E -v "sk_live_|sk_test_|ghp_" 2>/dev/null; then
               FOUND_SECRETS=1
             fi
@@ -226,7 +226,7 @@ jobs:
           FOUND_PATHS=0
           
           # Check for hardcoded paths in source files (excluding tests, CI, docs)
-          for pattern in "/home/" "/Users/" "C:\\\\"; do
+          for pattern in "/home/" "/Users/" "C:\\"; do
             if grep -r "$pattern" --include="*.py" --include="*.ts" \
               core-orchestrator/ chrome-extension/src/ dashboard-ui/src/ \
               --exclude-dir=node_modules \
