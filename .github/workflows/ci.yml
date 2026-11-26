@@ -172,7 +172,8 @@ jobs:
           FOUND_SECRETS=0
           
           # Scan for patterns but exclude test files, CI workflows, and config files
-          for pattern in "sk_live_" "sk_test_" "ghp_" "api_key\s*=" "password\s*="; do
+          # Use grep -P for PCRE patterns (\s), grep -E for extended regex (\|)
+          for pattern in "sk_live_" "sk_test_" "ghp_" "api_key[[:space:]]*=" "password[[:space:]]*="; do
             if grep -r "$pattern" --include="*.py" --include="*.ts" --include="*.json" --include="*.yaml" --include="*.yml" . \
               --exclude-dir=node_modules \
               --exclude-dir=dist \
@@ -200,8 +201,8 @@ jobs:
               | grep -v "VIBECORE_FAST_MODEL" \
               | grep -v "VIBECORE_REASONING_MODEL" \
               | grep -v "VIBECORE_MOCK_LLM" \
-              | grep -v "self.api_key\s*=" \
-              | grep -v "sk_live_\|sk_test_\|ghp_" 2>/dev/null; then
+              | grep -v "self.api_key[[:space:]]*=" \
+              | grep -E -v "sk_live_|sk_test_|ghp_" 2>/dev/null; then
               FOUND_SECRETS=1
             fi
           done
