@@ -9,16 +9,14 @@ an implicit BehavioralRule to continuously adapt to user preferences.
 
 from __future__ import annotations
 
-import difflib
 import logging
-from datetime import datetime, timezone
-import json
 import sqlite3
-from typing import Any, Dict, List, Optional
+import sys
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any
 from uuid import uuid4
 
-import sys
-from pathlib import Path
 ROOT_DIR = Path(__file__).resolve().parent.parent.parent.parent
 sys.path.insert(0, str(ROOT_DIR))
 sys.path.insert(0, str(ROOT_DIR / "core-orchestrator"))
@@ -41,7 +39,7 @@ class EditDeltaEngine:
     inducing reusable BehavioralRules without expanding prompt token windows.
     """
 
-    def __init__(self, db_path: Optional[str] = None):
+    def __init__(self, db_path: str | None = None):
         self.db_path = db_path or str(get_db_path("behavioral_rules.db"))
         self._init_db()
 
@@ -74,8 +72,8 @@ class EditDeltaEngine:
     async def learn_from_edit(
         self,
         original_envelope: ActionEnvelope,
-        revised_payload: Dict[str, Any],
-    ) -> Optional[BehavioralRule]:
+        revised_payload: dict[str, Any],
+    ) -> BehavioralRule | None:
         """
         Analyzes the delta between original payload and revised payload.
         """
@@ -84,8 +82,8 @@ class EditDeltaEngine:
 
         # Detect text diff in common fields like body, message, text, notes
         text_keys = ["body", "message", "text", "content", "summary"]
-        orig_text: Optional[str] = None
-        rev_text: Optional[str] = None
+        orig_text: str | None = None
+        rev_text: str | None = None
 
         for k in text_keys:
             if k in original_payload and k in revised_payload:
@@ -96,14 +94,6 @@ class EditDeltaEngine:
         if not orig_text or not rev_text or orig_text.strip() == rev_text.strip():
             logger.info("No significant text delta detected in revised payload.")
             return None
-
-        # Compute line/word diff
-        diff_lines = list(difflib.unified_diff(
-            orig_text.splitlines(keepends=True),
-            rev_text.splitlines(keepends=True),
-            fromfile="agent_draft",
-            tofile="user_final",
-        ))
 
         # Semantic heuristic extraction (local rule induction)
         category = BehavioralCategory.COMMUNICATION_TONE
@@ -148,7 +138,7 @@ class EditDeltaEngine:
             inferred_delta_rationale=inferred_rationale,
             weight=1.5,
             reinforcement_count=1,
-            created_at=datetime.now(timezone.utc),
+            created_at=datetime.now(UTC),
         )
 
         final_rule = self._save_or_reinforce_rule(rule)
@@ -179,10 +169,11 @@ class EditDeltaEngine:
                         count + 1,
                         rule.action_directive,
                         rule.inferred_delta_rationale,
-                        datetime.now(timezone.utc).isoformat(),
+                        datetime.now(UTC).isoformat(),
                         rule_id,
                     ),
                 )
+                conn.commit()
                 # Return the existing rule with updated values
                 return BehavioralRule(
                     rule_id=rule_id,
@@ -195,7 +186,7 @@ class EditDeltaEngine:
                     weight=min(5.0, current_weight + 0.5),
                     reinforcement_count=count + 1,
                     created_at=rule.created_at,
-                    last_triggered_at=datetime.now(timezone.utc),
+                    last_triggered_at=datetime.now(UTC),
                 )
             else:
                 conn.execute(
@@ -218,13 +209,13 @@ class EditDeltaEngine:
                         rule.weight,
                         rule.reinforcement_count,
                         rule.created_at.isoformat(),
-                        datetime.now(timezone.utc).isoformat(),
+                        datetime.now(UTC).isoformat(),
                     ),
                 )
                 conn.commit()
                 return rule
 
-    def get_applicable_rules(self, category: Optional[BehavioralCategory] = None) -> List[BehavioralRule]:
+    def get_applicable_rules(self, category: BehavioralCategory | None = None) -> list[BehavioralRule]:
         with self._get_connection() as conn:
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()

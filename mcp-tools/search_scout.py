@@ -12,13 +12,13 @@ from __future__ import annotations
 import logging
 import os
 import re
-import xml.etree.ElementTree as ET
-from datetime import datetime, timezone, timedelta
-from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
-
-import httpx
 import sys
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
+from typing import Any
+
+import defusedxml.ElementTree as ET
+import httpx
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT_DIR))
@@ -26,8 +26,8 @@ sys.path.insert(0, str(ROOT_DIR / "core-orchestrator"))
 sys.path.insert(0, str(ROOT_DIR / "policy-enclave"))
 sys.path.insert(0, str(ROOT_DIR / "mcp-tools"))
 
+from app.schemas import ContextNode, TechRadarItem, TierLevel
 from enclave import enforce_policy
-from app.schemas import TierLevel, ContextNode, ContextNodeType, TechRadarItem
 
 logger = logging.getLogger("SearchScout")
 
@@ -44,15 +44,18 @@ class SearchScoutTool:
     @staticmethod
     @enforce_policy(tool_name="arxiv_fetch_papers", tier=TierLevel.TIER_0_OBSERVE)
     async def fetch_recent_papers(
-        categories: List[str] = ["cs.AI", "cs.LG", "cs.CL"],
+        categories: list[str] | None = None,
         max_results: int = 8,
         offline: bool = False,
         **kwargs: Any,
-    ) -> List[Dict[str, Any]]:
+    ) -> list[dict[str, Any]]:
         """
         Fetches recently published preprints from arXiv API, parsing Atom XML feeds.
         Falls back to realistic offline fixtures if offline=True or network is unavailable.
         """
+        if categories is None:
+            categories = ["cs.AI", "cs.LG", "cs.CL"]
+
         if offline or os.environ.get("VIBECORE_OFFLINE_MODE") == "1":
             logger.info("Using offline fixture feed for arXiv papers.")
             return SearchScoutTool._arxiv_offline_fixtures()
@@ -72,7 +75,7 @@ class SearchScoutTool:
                     papers = SearchScoutTool._parse_arxiv_xml(response.text)
                     if papers:
                         return papers
-        except Exception as e:
+        except (httpx.HTTPError, OSError, ValueError) as e:
             logger.warning(f"Live arXiv API request failed ({e}). Falling back to offline fixtures.")
 
         return SearchScoutTool._arxiv_offline_fixtures()
@@ -80,19 +83,22 @@ class SearchScoutTool:
     @staticmethod
     @enforce_policy(tool_name="github_scan_trending", tier=TierLevel.TIER_0_OBSERVE)
     async def scan_trending(
-        topics: List[str] = ["ai-agents", "local-first", "llm"],
+        topics: list[str] | None = None,
         max_results: int = 8,
         offline: bool = False,
         **kwargs: Any,
-    ) -> List[Dict[str, Any]]:
+    ) -> list[dict[str, Any]]:
         """
         Scans GitHub for active repositories created or pushed within the last 7 days.
         """
+        if topics is None:
+            topics = ["ai-agents", "local-first", "llm"]
+
         if offline or os.environ.get("VIBECORE_OFFLINE_MODE") == "1":
             logger.info("Using offline fixture feed for GitHub trending repositories.")
             return SearchScoutTool._github_offline_fixtures()
 
-        since_date = (datetime.now(timezone.utc) - timedelta(days=7)).strftime("%Y-%m-%d")
+        since_date = (datetime.now(UTC) - timedelta(days=7)).strftime("%Y-%m-%d")
         query = f"created:>{since_date} stars:>10 " + " ".join(topics)
 
         headers = {
@@ -128,7 +134,7 @@ class SearchScoutTool:
                             }
                             for item in items
                         ]
-        except Exception as e:
+        except (httpx.HTTPError, OSError, ValueError, KeyError, TypeError) as e:
             logger.warning(f"Live GitHub API search failed ({e}). Falling back to offline fixtures.")
 
         return SearchScoutTool._github_offline_fixtures()
@@ -139,18 +145,18 @@ class SearchScoutTool:
 
     @staticmethod
     def filter_signal_to_trajectory(
-        raw_papers: List[Dict[str, Any]],
-        raw_repos: List[Dict[str, Any]],
-        trajectories: List[ContextNode],
-    ) -> List[TechRadarItem]:
+        raw_papers: list[dict[str, Any]],
+        raw_repos: list[dict[str, Any]],
+        trajectories: list[ContextNode],
+    ) -> list[TechRadarItem]:
         """
         Evaluates relevance scores between raw scout items and user trajectories.
         Filters out low-leverage items and attaches explicit 'why it matters' rationales.
         """
-        scored_items: List[Tuple[float, TechRadarItem]] = []
+        scored_items: list[tuple[float, TechRadarItem]] = []
 
         # Build trajectory keyword universe
-        trajectory_keywords: Dict[str, List[str]] = {
+        trajectory_keywords: dict[str, list[str]] = {
             "Longitudinal Memory": ["memory", "consolidation", "temporal", "graph", "decay", "sleep", "longitudinal"],
             "Zero-Trust Guardrails": ["guardrail", "policy", "security", "zero-trust", "enclave", "injection", "hitl", "safety"],
             "Local Inference": ["local", "ollama", "vllm", "quantization", "llama.cpp", "serving", "offline", "edge"],
@@ -200,9 +206,9 @@ class SearchScoutTool:
     @staticmethod
     def _score_text(
         text: str,
-        trajectory_keywords: Dict[str, List[str]],
+        trajectory_keywords: dict[str, list[str]],
         item_title: str,
-    ) -> Tuple[float, str, str]:
+    ) -> tuple[float, str, str]:
         best_score = 0.0
         best_tag = "General AI"
         best_rationale = "General relevant open-source development."
@@ -226,8 +232,8 @@ class SearchScoutTool:
     # ========================================================================
 
     @staticmethod
-    def _parse_arxiv_xml(xml_content: str) -> List[Dict[str, Any]]:
-        entries: List[Dict[str, Any]] = []
+    def _parse_arxiv_xml(xml_content: str) -> list[dict[str, Any]]:
+        entries: list[dict[str, Any]] = []
         try:
             root = ET.fromstring(xml_content)
             namespace = {"atom": "http://www.w3.org/2005/Atom"}
@@ -239,14 +245,14 @@ class SearchScoutTool:
                 published = entry.find("atom:published", namespace)
 
                 author_els = entry.findall("atom:author", namespace)
-                authors = [
-                    a.find("atom:name", namespace).text.strip()
-                    for a in author_els
-                    if a.find("atom:name", namespace) is not None
-                ]
+                authors = []
+                for a in author_els:
+                    name_el = a.find("atom:name", namespace)
+                    if name_el is not None and name_el.text:
+                        authors.append(name_el.text.strip())
 
-                clean_title = re.sub(r"\s+", " ", title.text or "").strip()
-                clean_summary = re.sub(r"\s+", " ", summary.text or "").strip()
+                clean_title = re.sub(r"\s+", " ", (title.text if title is not None and title.text else "")).strip()
+                clean_summary = re.sub(r"\s+", " ", (summary.text if summary is not None and summary.text else "")).strip()
                 url = id_el.text.strip() if id_el is not None and id_el.text else ""
 
                 if clean_title:
@@ -257,12 +263,12 @@ class SearchScoutTool:
                         "summary": clean_summary,
                         "published": published.text if published is not None else "",
                     })
-        except Exception as e:
+        except (ET.ParseError, AttributeError, ValueError) as e:
             logger.warning(f"Error parsing arXiv XML: {e}")
         return entries
 
     @staticmethod
-    def _arxiv_offline_fixtures() -> List[Dict[str, Any]]:
+    def _arxiv_offline_fixtures() -> list[dict[str, Any]]:
         return [
             {
                 "title": "Longitudinal Memory Consolidation in Autonomous Agent Swarms",
@@ -285,7 +291,7 @@ class SearchScoutTool:
         ]
 
     @staticmethod
-    def _github_offline_fixtures() -> List[Dict[str, Any]]:
+    def _github_offline_fixtures() -> list[dict[str, Any]]:
         return [
             {
                 "repo": "vllm-project/vllm",

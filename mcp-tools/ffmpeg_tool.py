@@ -11,24 +11,22 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
 import shutil
-import subprocess
-from datetime import datetime, timezone
+import sys
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any
 from uuid import uuid4
 
-import sys
 ROOT_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT_DIR))
 sys.path.insert(0, str(ROOT_DIR / "core-orchestrator"))
 sys.path.insert(0, str(ROOT_DIR / "policy-enclave"))
 sys.path.insert(0, str(ROOT_DIR / "mcp-tools"))
 
-from enclave import enforce_policy
 from app.config import get_vibecore_home
 from app.schemas import TierLevel
+from enclave import enforce_policy
 
 logger = logging.getLogger("FFmpegTool")
 
@@ -55,7 +53,7 @@ class FFmpegClippingTool:
 
     @staticmethod
     @enforce_policy(tool_name="ffmpeg_probe_metadata", tier=TierLevel.TIER_0_OBSERVE)
-    async def probe_metadata(file_path: str, timeout: float = SUBPROCESS_TIMEOUT_SECONDS, **kwargs: Any) -> Dict[str, Any]:
+    async def probe_metadata(file_path: str, timeout: float = SUBPROCESS_TIMEOUT_SECONDS, **kwargs: Any) -> dict[str, Any]:
         """
         Probes media container metadata using ffprobe or fallback inspection.
         Guards against hangs on corrupt media via strict timeouts.
@@ -92,14 +90,14 @@ class FFmpegClippingTool:
                         "duration_seconds": 184.5,
                         "resolution": "1920x1080",
                     }
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     try:
                         proc.kill()
                         await proc.wait()
-                    except Exception:
-                        pass
+                    except (ProcessLookupError, OSError) as exc:
+                        logger.debug("Ignoring process termination error during ffprobe cleanup: %s", exc)
                     logger.warning(f"ffprobe timed out after {timeout}s on {path}")
-            except Exception as e:
+            except (OSError, ValueError) as e:
                 logger.warning(f"ffprobe execution failed: {e}")
 
         return {
@@ -118,11 +116,11 @@ class FFmpegClippingTool:
         start_time: float,
         end_time: float,
         aspect_ratio: str = "9:16",
-        clip_name: Optional[str] = None,
-        transcript_snippet: Optional[str] = None,
+        clip_name: str | None = None,
+        transcript_snippet: str | None = None,
         timeout: float = SUBPROCESS_TIMEOUT_SECONDS,
         **kwargs: Any
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """
         Cuts a raw video highlight and exports vertical/horizontal clip into ~/.vibecore/staged_clips/.
         Generates corresponding .srt subtitle file for immediate review.
@@ -166,15 +164,15 @@ class FFmpegClippingTool:
                 )
                 try:
                     await asyncio.wait_for(proc.communicate(), timeout=timeout)
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     try:
                         proc.kill()
                         await proc.wait()
-                    except Exception:
-                        pass
+                    except (ProcessLookupError, OSError) as exc:
+                        logger.debug("Ignoring process termination error during ffmpeg cleanup: %s", exc)
                     logger.warning(f"ffmpeg timed out after {timeout}s on {input_path}")
                     output_mp4.touch()
-            except Exception as e:
+            except (OSError, ValueError) as e:
                 logger.warning(f"ffmpeg subprocess execution failed: {e}. Staging metadata stub.")
                 output_mp4.touch()
         else:
@@ -189,5 +187,5 @@ class FFmpegClippingTool:
             "duration": duration,
             "aspect_ratio": aspect_ratio,
             "ready_for_review": True,
-            "staged_at": datetime.now(timezone.utc).isoformat(),
+            "staged_at": datetime.now(UTC).isoformat(),
         }

@@ -11,14 +11,11 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-from datetime import datetime, timezone, timedelta
-import json
 import logging
-from typing import Any, Dict, List, Optional
-from uuid import uuid4
-
 import sys
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from uuid import uuid4
 
 ROOT_DIR = Path(__file__).resolve().parent.parent.parent.parent
 sys.path.insert(0, str(ROOT_DIR))
@@ -26,24 +23,21 @@ sys.path.insert(0, str(ROOT_DIR / "core-orchestrator"))
 sys.path.insert(0, str(ROOT_DIR / "policy-enclave"))
 sys.path.insert(0, str(ROOT_DIR / "mcp-tools"))
 
+from calendar_tool import CalendarTool
+from enclave import get_policy_enclave
+from gmail_tool import GmailTool
+from search_scout import SearchScoutTool
+
+from app.ledger.context_graph import ContextKnowledgeGraph
+from app.ledger.edit_delta import EditDeltaEngine
 from app.schemas import (
-    ActionEnvelope,
-    ApprovalStatus,
     CommitmentItem,
     ContextNode,
     ContextNodeType,
     DiffPreview,
     MorningBrief,
     ScheduleConflict,
-    TechRadarItem,
-    TierLevel,
 )
-from app.ledger.context_graph import ContextKnowledgeGraph
-from app.ledger.edit_delta import EditDeltaEngine
-from enclave import get_policy_enclave, ActionSuspendedException
-from gmail_tool import GmailTool
-from calendar_tool import CalendarTool
-from search_scout import SearchScoutTool
 
 logger = logging.getLogger("MorningBriefAgent")
 logging.basicConfig(level=logging.INFO)
@@ -61,8 +55,8 @@ class MorningBriefAgent:
 
     def __init__(
         self,
-        context_graph: Optional[ContextKnowledgeGraph] = None,
-        edit_delta_engine: Optional[EditDeltaEngine] = None,
+        context_graph: ContextKnowledgeGraph | None = None,
+        edit_delta_engine: EditDeltaEngine | None = None,
     ):
         self.graph = context_graph or ContextKnowledgeGraph()
         self.edit_delta = edit_delta_engine or EditDeltaEngine()
@@ -81,7 +75,7 @@ class MorningBriefAgent:
             f" Starting Overnight Morning Brief Pipeline "
             f"(Mode: {'LIVE SCOUTS' if live_scouts else 'OFFLINE/CACHED'})..."
         )
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
 
         # 1. Memory consolidation & decay pass
         logger.info("Phase 1: Nightly memory consolidation & decay pass...")
@@ -101,8 +95,8 @@ class MorningBriefAgent:
         logger.info("Phase 3: Scanning unread emails for commitments & financial notices...")
         unread_threads = await GmailTool.read_unread_threads(max_results=10)
 
-        detected_commitments: List[CommitmentItem] = []
-        subscription_alerts: List[str] = []
+        detected_commitments: list[CommitmentItem] = []
+        subscription_alerts: list[str] = []
 
         for thread in unread_threads:
             snippet = thread.get("snippet", "")
@@ -122,7 +116,7 @@ class MorningBriefAgent:
                     f"[VibeCore auto-staged adhering to policy: '{tone_directive}']"
                 )
 
-                draft = await GmailTool.create_draft(
+                await GmailTool.create_draft(
                     to=sender,
                     subject=f"Re: {subject}",
                     body=staged_body,
@@ -146,7 +140,7 @@ class MorningBriefAgent:
                 detected_commitments.append(
                     CommitmentItem(
                         source="gmail",
-                        summary=f"Sarah Chen requests GPU cluster allocation confirmation by Thursday 3 PM.",
+                        summary="Sarah Chen requests GPU cluster allocation confirmation by Thursday 3 PM.",
                         counterparty=sender,
                         due_datetime=now + timedelta(days=2),
                         confidence=0.92,
@@ -161,7 +155,7 @@ class MorningBriefAgent:
         # 4. Scan Calendar & Identify Conflicts (72-hour window)
         logger.info("Phase 4: Scanning calendar events for the next 72 hours...")
         calendar_events = await CalendarTool.list_events(window_hours=72)
-        schedule_conflicts: List[ScheduleConflict] = []
+        schedule_conflicts: list[ScheduleConflict] = []
 
         for i in range(len(calendar_events)):
             for j in range(i + 1, len(calendar_events)):

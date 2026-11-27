@@ -4,33 +4,26 @@ EditDeltaEngine edge cases, and FrameDeduplicator.
 Author: Sandeep Hipparagi (https://github.com/Sandeep-Hipparagi)
 """
 
-import json
-import pytest
-import httpx
-from datetime import datetime, timezone, timedelta
+from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx
+import pytest
+from app.ledger.context_graph import ContextKnowledgeGraph
+from app.ledger.edit_delta import EditDeltaEngine
+from app.main import frame_deduplicator
 from app.router.hybrid_router import (
     HybridRouter,
     PiiScrubber,
-    OllamaClient,
-    OpenAICompatibleClient,
-    CloudFrontierClient,
     get_hybrid_router,
     shutdown_hybrid_router,
 )
-from app.ledger.context_graph import ContextKnowledgeGraph
-from app.ledger.edit_delta import EditDeltaEngine
 from app.schemas import (
+    ActionEnvelope,
     ContextNode,
     ContextNodeType,
-    BehavioralCategory,
-    ActionEnvelope,
-    ApprovalStatus,
     TierLevel,
-    DiffPreview,
 )
-from app.main import frame_deduplicator
 
 
 class TestPiiScrubber:
@@ -48,7 +41,7 @@ class TestPiiScrubber:
 
     def test_scrub_phones(self):
         text = "Call +1-555-123-4567 or (555) 123-4567."
-        scrubbed, token_map = PiiScrubber.scrub(text)
+        scrubbed, _token_map = PiiScrubber.scrub(text)
         assert "[REDACTED_PHONE_1]" in scrubbed
         assert "[REDACTED_PHONE_2]" in scrubbed
         assert "+1-555-123-4567" not in scrubbed
@@ -56,7 +49,7 @@ class TestPiiScrubber:
 
     def test_scrub_credit_cards(self):
         text = "Card: 4111 1111 1111 1111 and 4111-1111-1111-1111"
-        scrubbed, token_map = PiiScrubber.scrub(text)
+        scrubbed, _token_map = PiiScrubber.scrub(text)
         assert "[REDACTED_CARD_1]" in scrubbed
         assert "[REDACTED_CARD_2]" in scrubbed
         assert "4111 1111 1111 1111" not in scrubbed
@@ -256,8 +249,8 @@ class TestContextGraphDecay:
             confidence=1.0,
             decay_rate=0.05,
             access_count=0,
-            last_accessed=datetime.now(timezone.utc),
-            created_at=datetime.now(timezone.utc),
+            last_accessed=datetime.now(UTC),
+            created_at=datetime.now(UTC),
             source="test",
             tags=["test"],
         )
@@ -265,7 +258,7 @@ class TestContextGraphDecay:
         assert relevance == 1.0  # Fresh node with confidence 1.0
 
     def test_compute_decayed_relevance_aged_node(self, graph):
-        old_time = datetime.now(timezone.utc) - timedelta(days=10)
+        old_time = datetime.now(UTC) - timedelta(days=10)
         node = ContextNode(
             node_id="test-2",
             node_type=ContextNodeType.FACT,
@@ -284,7 +277,7 @@ class TestContextGraphDecay:
         assert 0.55 < relevance < 0.65
 
     def test_compute_decayed_relevance_with_access_boost(self, graph):
-        old_time = datetime.now(timezone.utc) - timedelta(days=10)
+        old_time = datetime.now(UTC) - timedelta(days=10)
         node = ContextNode(
             node_id="test-3",
             node_type=ContextNodeType.FACT,
@@ -303,7 +296,7 @@ class TestContextGraphDecay:
         assert 0.85 < relevance < 0.95
 
     def test_find_nodes_sorts_by_relevance(self, graph):
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         old_time = now - timedelta(days=20)
 
         fresh_node = ContextNode(

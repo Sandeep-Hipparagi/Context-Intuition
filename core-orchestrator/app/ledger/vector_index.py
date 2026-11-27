@@ -9,13 +9,10 @@ and hybrid semantic + temporal ranking for ContextKnowledgeGraph.
 from __future__ import annotations
 
 import hashlib
-import json
 import logging
 import os
 import re
-import time
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
 import numpy as np
@@ -28,7 +25,7 @@ logger = logging.getLogger("VectorIndex")
 @dataclass
 class EmbeddingResult:
     """Result of embedding generation."""
-    vector: List[float]
+    vector: list[float]
     model: str
     dimension: int
     source: str  # "ollama" or "offline"
@@ -41,17 +38,17 @@ class LocalEmbeddingEngine:
 
     def __init__(
         self,
-        ollama_url: Optional[str] = None,
-        model: Optional[str] = None,
-        mock_mode: bool = False,
+        ollama_url: str | None = None,
+        model: str | None = None,
+        mock_mode: bool | None = None,
         dimension: int = 256,
     ):
         self.ollama_url = ollama_url or settings.OLLAMA_URL.replace("/api/chat", "/api/embeddings")
         self.model = model or os.environ.get("VIBECORE_EMBED_MODEL", "nomic-embed-text")
-        self.mock_mode = mock_mode or settings.MOCK_LLM
+        self.mock_mode = settings.MOCK_LLM if mock_mode is None else mock_mode
         self.dimension = dimension
-        self._client: Optional[httpx.AsyncClient] = None
-        self._offline_cache: Dict[str, List[float]] = {}
+        self._client: httpx.AsyncClient | None = None
+        self._offline_cache: dict[str, list[float]] = {}
 
     @property
     def client(self) -> httpx.AsyncClient:
@@ -73,18 +70,18 @@ class LocalEmbeddingEngine:
         try:
             result = await self._ollama_embed(text)
             return result
-        except Exception as e:
+        except (httpx.HTTPError, OSError, ValueError, KeyError, TypeError) as e:
             logger.warning(f"Ollama embedding failed: {e}. Falling back to offline mode.")
             return self._offline_embed(text)
 
-    async def embed_batch(self, texts: List[str]) -> List[EmbeddingResult]:
+    async def embed_batch(self, texts: list[str]) -> list[EmbeddingResult]:
         """Generate embeddings for multiple texts."""
         if self.mock_mode:
             return [self._offline_embed(t) for t in texts]
 
         try:
             return await self._ollama_embed_batch(texts)
-        except Exception as e:
+        except (httpx.HTTPError, OSError, ValueError, KeyError, TypeError) as e:
             logger.warning(f"Ollama batch embedding failed: {e}. Falling back to offline mode.")
             return [self._offline_embed(t) for t in texts]
 
@@ -111,12 +108,9 @@ class LocalEmbeddingEngine:
             source="ollama",
         )
 
-    async def _ollama_embed_batch(self, texts: List[str]) -> List[EmbeddingResult]:
+    async def _ollama_embed_batch(self, texts: list[str]) -> list[EmbeddingResult]:
         """Call Ollama /api/embeddings for multiple texts (sequential for simplicity)."""
-        results = []
-        for text in texts:
-            results.append(await self._ollama_embed(text))
-        return results
+        return [await self._ollama_embed(text) for text in texts]
 
     def _offline_embed(self, text: str) -> EmbeddingResult:
         """
@@ -143,7 +137,7 @@ class LocalEmbeddingEngine:
             source="offline",
         )
 
-    def _feature_hash_embed(self, text: str) -> List[float]:
+    def _feature_hash_embed(self, text: str) -> list[float]:
         """
         Deterministic feature hashing embedding.
         Uses character 3-grams and word-level hashing for stability.
@@ -152,17 +146,13 @@ class LocalEmbeddingEngine:
         if not text:
             return [0.0] * self.dimension
 
-        # Feature extraction: character 3-grams + words
-        features = []
-        
         # Character 3-grams
-        for i in range(len(text) - 2):
-            features.append(text[i:i+3])
-        
+        features = [text[i : i + 3] for i in range(len(text) - 2)]
+
         # Word-level features
         words = re.findall(r'\b\w+\b', text)
         features.extend(words)
-        
+
         # Hash each feature to a position in the vector
         vector = np.zeros(self.dimension, dtype=np.float32)
         for feature in features:
@@ -178,10 +168,10 @@ class LocalEmbeddingEngine:
         norm = np.linalg.norm(vector)
         if norm > 0:
             vector = vector / norm
-        
+
         return vector.tolist()
 
-    def cosine_similarity(self, vec1: List[float], vec2: List[float]) -> float:
+    def cosine_similarity(self, vec1: list[float], vec2: list[float]) -> float:
         """Compute cosine similarity between two vectors (clamped to [0, 1])."""
         if not vec1 or not vec2 or len(vec1) != len(vec2):
             return 0.0
@@ -196,7 +186,7 @@ class LocalEmbeddingEngine:
 
 
 # Global embedding engine instance
-_global_embedding_engine: Optional[LocalEmbeddingEngine] = None
+_global_embedding_engine: LocalEmbeddingEngine | None = None
 
 
 def get_embedding_engine() -> LocalEmbeddingEngine:

@@ -3,28 +3,28 @@ Wave 2 Tests: Capability-Based Security, Declarative Policy DSL & Multi-Profile 
 Author: Sandeep Hipparagi (https://github.com/Sandeep-Hipparagi)
 """
 
-import json
-import os
-import tempfile
 import time
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
 
-import pytest
 import httpx
-
-from app.config import get_vibecore_home, get_db_path, get_or_create_bridge_token, get_or_create_capability_secret, get_profile_name, _validate_profile_name
-from app.schemas import ActionEnvelope, ApprovalStatus, TierLevel, DiffPreview
-from app.main import app, policy_enclave, tool_dispatcher, frame_deduplicator
-from enclave import get_policy_enclave, IdempotencyConflictError, CapabilityVerificationError
-from policy_loader import PolicyLoader, get_policy_loader, reload_policy
+import pytest
+from app.config import (
+    _validate_profile_name,
+    get_db_path,
+    get_or_create_bridge_token,
+    get_or_create_capability_secret,
+    get_vibecore_home,
+)
+from app.main import app, tool_dispatcher
+from app.schemas import TierLevel
 from capabilities import (
     CapabilityManager,
-    CapabilityToken,
+    CapabilityVerificationError,
     mint_capability_token,
     verify_capability_token,
-    CapabilityVerificationError,
 )
+from enclave import get_policy_enclave
+from policy_loader import PolicyLoader, get_policy_loader
 
 
 class TestProfileValidation:
@@ -160,7 +160,7 @@ class TestCapabilityTokens:
         """Test that tokens with invalid signatures are rejected."""
         # Create a token with valid payload but tampered signature
         token = manager.mint("action-123", "gmail_send_message", {"to": "test@test.com"})
-        payload_b64, sig_b64 = token.split(".", 1)
+        payload_b64, _sig_b64 = token.split(".", 1)
         tampered_token = f"{payload_b64}.invalidsignature"
 
         with pytest.raises(CapabilityVerificationError, match="Invalid signature"):
@@ -259,12 +259,12 @@ sandbox_roots:
         loader = PolicyLoader(temp_policy)
 
         # Internal domain -> downgraded to TIER_1_STAGE
-        tier, risk, factors = loader.evaluate("test_tool_tier2", {"recipient": "user@internal.com"}, 0.7)
+        tier, _risk, factors = loader.evaluate("test_tool_tier2", {"recipient": "user@internal.com"}, 0.7)
         assert tier == TierLevel.TIER_1_STAGE
         assert any("allowlist" in f for f in factors)
 
         # External domain -> stays TIER_2_COMMIT
-        tier, risk, factors = loader.evaluate("test_tool_tier2", {"recipient": "user@external.com"}, 0.7)
+        tier, _risk, factors = loader.evaluate("test_tool_tier2", {"recipient": "user@external.com"}, 0.7)
         assert tier == TierLevel.TIER_2_COMMIT
         assert any("External domain" in f for f in factors)
 
@@ -286,6 +286,7 @@ sandbox_roots:
         """Test hot-reload when policy file is modified."""
         loader = PolicyLoader(temp_policy)
         policy1 = loader.load()
+        assert policy1.default_tier == TierLevel.TIER_2_COMMIT
 
         # Modify the policy file
         import time
@@ -424,7 +425,6 @@ class TestDispatcherCapabilityEnforcement:
         monkeypatch.setenv("VIBECORE_HOME", str(test_base))
         monkeypatch.setenv("VIBECORE_PROFILE", "test")
 
-        from enclave import get_policy_enclave
         enclave = get_policy_enclave()
 
         # Create and enqueue an envelope
@@ -449,7 +449,6 @@ class TestDispatcherCapabilityEnforcement:
         monkeypatch.setenv("VIBECORE_HOME", str(test_base))
         monkeypatch.setenv("VIBECORE_PROFILE", "test")
 
-        from enclave import get_policy_enclave
         enclave = get_policy_enclave()
 
         # Create and enqueue an envelope
@@ -484,7 +483,6 @@ class TestDispatcherCapabilityEnforcement:
         monkeypatch.setenv("VIBECORE_HOME", str(test_base))
         monkeypatch.setenv("VIBECORE_PROFILE", "test")
 
-        from enclave import get_policy_enclave
         enclave = get_policy_enclave()
 
         # Create and enqueue an envelope
@@ -524,7 +522,6 @@ class TestDispatcherCapabilityEnforcement:
         monkeypatch.setenv("VIBECORE_HOME", str(test_base))
         monkeypatch.setenv("VIBECORE_PROFILE", "test")
 
-        from enclave import get_policy_enclave
         enclave = get_policy_enclave()
 
         # Create and enqueue an envelope
@@ -562,7 +559,6 @@ class TestDispatcherCapabilityEnforcement:
         monkeypatch.setenv("VIBECORE_HOME", str(test_base))
         monkeypatch.setenv("VIBECORE_PROFILE", "test")
 
-        from enclave import get_policy_enclave
         enclave = get_policy_enclave()
 
         # Create and enqueue an envelope
@@ -601,7 +597,6 @@ class TestApprovalResolutionWithCapability:
         monkeypatch.setenv("VIBECORE_HOME", str(test_base))
         monkeypatch.setenv("VIBECORE_PROFILE", "test")
 
-        from enclave import get_policy_enclave
         enclave = get_policy_enclave()
 
         # Register a mock handler
@@ -668,8 +663,9 @@ class TestFileDeleteSandbox:
         dispatcher._handlers.clear()
 
         async def mock_file_delete(payload):
-            from app.config import get_vibecore_home
             from pathlib import Path
+
+            from app.config import get_vibecore_home
 
             path_str = payload.get("file_path") or payload.get("path")
             if not path_str:
@@ -679,7 +675,6 @@ class TestFileDeleteSandbox:
             vibecore_home = get_vibecore_home().resolve()
 
             # Get sandbox roots from policy
-            from policy_loader import get_policy_loader
             policy = get_policy_loader().load()
             sandbox_roots = policy.sandbox_roots or ["staged_clips", "exports", "temp"]
 
@@ -715,7 +710,6 @@ class TestFileDeleteSandbox:
         monkeypatch.setenv("VIBECORE_HOME", str(test_base))
         monkeypatch.setenv("VIBECORE_PROFILE", "test")
 
-        from enclave import get_policy_enclave
         enclave = get_policy_enclave()
 
         # Create test file in exports
@@ -757,7 +751,6 @@ class TestFileDeleteSandbox:
         monkeypatch.setenv("VIBECORE_HOME", str(test_base))
         monkeypatch.setenv("VIBECORE_PROFILE", "test")
 
-        from enclave import get_policy_enclave
         enclave = get_policy_enclave()
 
         # Create test file outside sandbox

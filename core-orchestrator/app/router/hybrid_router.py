@@ -9,11 +9,9 @@ Routes only anonymized high-complexity synthesis to cloud frontier models when l
 
 from __future__ import annotations
 
-import json
 import logging
-import os
 import re
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 
 import httpx
 
@@ -34,8 +32,8 @@ class PiiScrubber:
     PHONE_REGEX = re.compile(r"(?<!\d)(?:\+?\d{1,3}[-.\s]?)?(?:\(?\d{3}\)?[-.\s]?)?\d{3}[-.\s]?\d{4}(?!\d)")
 
     @classmethod
-    def scrub(cls, text: str) -> Tuple[str, Dict[str, str]]:
-        token_map: Dict[str, str] = {}
+    def scrub(cls, text: str) -> tuple[str, dict[str, str]]:
+        token_map: dict[str, str] = {}
         idx = 1
 
         def replace_email(match):
@@ -66,7 +64,7 @@ class PiiScrubber:
         return scrubbed, token_map
 
     @classmethod
-    def restore(cls, text: str, token_map: Dict[str, str]) -> str:
+    def restore(cls, text: str, token_map: dict[str, str]) -> str:
         restored = text
         for token, original in token_map.items():
             restored = restored.replace(token, original)
@@ -79,7 +77,7 @@ class OllamaClient:
     def __init__(self, base_url: str, timeout: float = 120.0):
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
-        self._client: Optional[httpx.AsyncClient] = None
+        self._client: httpx.AsyncClient | None = None
 
     async def _get_client(self) -> httpx.AsyncClient:
         if self._client is None or self._client.is_closed:
@@ -89,12 +87,12 @@ class OllamaClient:
     async def chat(
         self,
         model: str,
-        messages: List[Dict[str, str]],
-        format_schema: Optional[Dict[str, Any]] = None,
-        options: Optional[Dict[str, Any]] = None,
-    ) -> Dict[str, Any]:
+        messages: list[dict[str, str]],
+        format_schema: str | dict[str, Any] | None = None,
+        options: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         client = await self._get_client()
-        payload: Dict[str, Any] = {
+        payload: dict[str, Any] = {
             "model": model,
             "messages": messages,
             "stream": False,
@@ -120,7 +118,7 @@ class OpenAICompatibleClient:
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
         self.timeout = timeout
-        self._client: Optional[httpx.AsyncClient] = None
+        self._client: httpx.AsyncClient | None = None
 
     async def _get_client(self) -> httpx.AsyncClient:
         if self._client is None or self._client.is_closed:
@@ -133,12 +131,12 @@ class OpenAICompatibleClient:
     async def chat(
         self,
         model: str,
-        messages: List[Dict[str, str]],
-        response_format: Optional[Dict[str, Any]] = None,
+        messages: list[dict[str, str]],
+        response_format: dict[str, Any] | None = None,
         temperature: float = 0.1,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         client = await self._get_client()
-        payload: Dict[str, Any] = {
+        payload: dict[str, Any] = {
             "model": model,
             "messages": messages,
             "temperature": temperature,
@@ -163,7 +161,7 @@ class CloudFrontierClient:
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
         self.timeout = timeout
-        self._client: Optional[httpx.AsyncClient] = None
+        self._client: httpx.AsyncClient | None = None
 
     async def _get_client(self) -> httpx.AsyncClient:
         if self._client is None or self._client.is_closed:
@@ -176,10 +174,10 @@ class CloudFrontierClient:
     async def chat(
         self,
         model: str,
-        messages: List[Dict[str, str]],
+        messages: list[dict[str, str]],
         temperature: float = 0.3,
-        response_format: Optional[Dict[str, Any]] = None,
-    ) -> Dict[str, Any]:
+        response_format: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         client = await self._get_client()
         payload = {
             "model": model,
@@ -206,14 +204,14 @@ class HybridRouter:
 
     def __init__(
         self,
-        ollama_url: Optional[str] = None,
-        local_openai_url: Optional[str] = None,
-        cloud_api_url: Optional[str] = None,
-        cloud_api_key: Optional[str] = None,
-        fast_model: Optional[str] = None,
-        reasoning_model: Optional[str] = None,
+        ollama_url: str | None = None,
+        local_openai_url: str | None = None,
+        cloud_api_url: str | None = None,
+        cloud_api_key: str | None = None,
+        fast_model: str | None = None,
+        reasoning_model: str | None = None,
         confidence_threshold: float = 0.80,
-        mock_mode: bool = False,
+        mock_mode: bool | None = None,
     ):
         self.ollama_url = ollama_url or settings.OLLAMA_URL
         self.local_openai_url = local_openai_url or settings.LOCAL_OPENAI_URL
@@ -222,11 +220,11 @@ class HybridRouter:
         self.fast_model = fast_model or settings.FAST_MODEL
         self.reasoning_model = reasoning_model or settings.REASONING_MODEL
         self.confidence_threshold = confidence_threshold
-        self.mock_mode = mock_mode or settings.MOCK_LLM
+        self.mock_mode = settings.MOCK_LLM if mock_mode is None else mock_mode
 
-        self._ollama: Optional[OllamaClient] = None
-        self._local_openai: Optional[OpenAICompatibleClient] = None
-        self._cloud: Optional[CloudFrontierClient] = None
+        self._ollama: OllamaClient | None = None
+        self._local_openai: OpenAICompatibleClient | None = None
+        self._cloud: CloudFrontierClient | None = None
 
     @property
     def ollama(self) -> OllamaClient:
@@ -235,13 +233,13 @@ class HybridRouter:
         return self._ollama
 
     @property
-    def local_openai(self) -> Optional[OpenAICompatibleClient]:
+    def local_openai(self) -> OpenAICompatibleClient | None:
         if self.local_openai_url and self._local_openai is None:
             self._local_openai = OpenAICompatibleClient(self.local_openai_url)
         return self._local_openai
 
     @property
-    def cloud(self) -> Optional[CloudFrontierClient]:
+    def cloud(self) -> CloudFrontierClient | None:
         if self.cloud_api_url and self.cloud_api_key and self._cloud is None:
             self._cloud = CloudFrontierClient(self.cloud_api_url, self.cloud_api_key)
         return self._cloud
@@ -256,9 +254,9 @@ class HybridRouter:
         self,
         prompt: str,
         task_type: str = "classification",  # "classification" | "dom_parse" | "complex_reasoning"
-        system_prompt: Optional[str] = None,
-        response_format: Optional[Dict[str, Any]] = None,
-    ) -> Dict[str, Any]:
+        system_prompt: str | None = None,
+        response_format: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         """
         Executes local inference first. If confidence score is below threshold
         and task requires complex reasoning, anonymizes PII and routes to Cloud.
@@ -296,10 +294,10 @@ class HybridRouter:
     async def _call_local_llm(
         self,
         prompt: str,
-        system_prompt: Optional[str],
+        system_prompt: str | None,
         task_type: str,
-        response_format: Optional[Dict[str, Any]] = None,
-    ) -> Dict[str, Any]:
+        response_format: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         """Call local LLM (Ollama preferred, fallback to OpenAI-compatible)."""
         if self.mock_mode:
             return self._mock_response(prompt, task_type, "local_ollama")
@@ -313,7 +311,7 @@ class HybridRouter:
 
         # Try Ollama first
         try:
-            format_schema = None
+            format_schema: str | dict[str, Any] | None = None
             if response_format and response_format.get("type") == "json_object":
                 format_schema = "json"
 
@@ -331,7 +329,7 @@ class HybridRouter:
                 "routed_to": "local_ollama",
                 "model": model,
             }
-        except Exception as e:
+        except (httpx.HTTPError, OSError, ValueError, KeyError, TypeError) as e:
             logger.warning(f"Ollama call failed: {e}. Trying OpenAI-compatible endpoint...")
 
         # Fallback to OpenAI-compatible local endpoint
@@ -350,7 +348,7 @@ class HybridRouter:
                     "routed_to": "local_openai_compatible",
                     "model": model,
                 }
-            except Exception as e:
+            except (httpx.HTTPError, OSError, ValueError, KeyError, TypeError) as e:
                 logger.error(f"Local OpenAI-compatible call failed: {e}")
 
         # Final fallback to mock
@@ -360,12 +358,17 @@ class HybridRouter:
     async def _call_cloud_llm(
         self,
         scrubbed_prompt: str,
-        system_prompt: Optional[str],
-        response_format: Optional[Dict[str, Any]] = None,
-    ) -> Dict[str, Any]:
+        system_prompt: str | None,
+        response_format: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         """Call cloud frontier model."""
         if self.mock_mode:
             return self._mock_response(scrubbed_prompt, "complex_reasoning", "frontier_cloud")
+
+        cloud_client = self.cloud
+        if cloud_client is None:
+            logger.warning("Cloud client not configured. Falling back to mock response.")
+            return self._mock_response(scrubbed_prompt, "complex_reasoning", "frontier_cloud_mock_fallback")
 
         messages = []
         if system_prompt:
@@ -373,7 +376,7 @@ class HybridRouter:
         messages.append({"role": "user", "content": scrubbed_prompt})
 
         try:
-            result = await self.cloud.chat(
+            result = await cloud_client.chat(
                 model="gpt-4o",  # Default frontier model
                 messages=messages,
                 response_format=response_format,
@@ -385,12 +388,12 @@ class HybridRouter:
                 "confidence": 0.95,
                 "routed_to": "frontier_cloud",
             }
-        except Exception as e:
+        except (httpx.HTTPError, OSError, ValueError, KeyError, TypeError) as e:
             logger.error(f"Cloud LLM call failed: {e}")
             # Fallback to local mock on cloud failure
             return self._mock_response(scrubbed_prompt, "complex_reasoning", "frontier_cloud_mock_fallback")
 
-    def _mock_response(self, prompt: str, task_type: str, routed_to: str) -> Dict[str, Any]:
+    def _mock_response(self, prompt: str, task_type: str, routed_to: str) -> dict[str, Any]:
         """Deterministic mock response for offline/CI testing."""
         model = self._select_model(task_type)
         return {
@@ -425,7 +428,7 @@ class HybridRouter:
 
 
 # Global router instance
-_global_router: Optional[HybridRouter] = None
+_global_router: HybridRouter | None = None
 
 
 def get_hybrid_router() -> HybridRouter:

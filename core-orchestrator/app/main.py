@@ -9,33 +9,31 @@ for the Zero-Trust Approval Queue and Context Intuition Ledger.
 
 from __future__ import annotations
 
-from contextlib import asynccontextmanager
-import asyncio
-from collections import OrderedDict
-from datetime import datetime, timezone
 import hmac
 import json
 import logging
 import os
 import re
-from typing import Any, Dict, List, Optional
+import sys
+from collections import OrderedDict
+from contextlib import asynccontextmanager
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Annotated, Any
 from uuid import uuid4
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from fastapi import (
     FastAPI,
-    WebSocket,
-    WebSocketDisconnect,
     HTTPException,
     Query,
+    WebSocket,
+    WebSocketDisconnect,
     status,
 )
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
-
-import sys
-from pathlib import Path
+from pydantic import BaseModel, ValidationError
 
 ROOT_DIR = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(ROOT_DIR))
@@ -43,7 +41,14 @@ sys.path.insert(0, str(ROOT_DIR / "core-orchestrator"))
 sys.path.insert(0, str(ROOT_DIR / "policy-enclave"))
 sys.path.insert(0, str(ROOT_DIR / "mcp-tools"))
 
-from app.config import settings, get_or_create_bridge_token
+from capabilities import mint_capability_token
+from enclave import IdempotencyConflictError, get_policy_enclave
+
+from app.agents.morning_brief import MorningBriefAgent
+from app.config import get_or_create_bridge_token, settings
+from app.dispatcher import BridgeDisconnectedError, CapabilityVerificationError, ToolDispatcher
+from app.ledger.context_graph import ContextKnowledgeGraph
+from app.ledger.edit_delta import EditDeltaEngine
 from app.schemas import (
     ActionEnvelope,
     ApprovalStatus,
@@ -51,18 +56,9 @@ from app.schemas import (
     BridgeMessageType,
     ContextNode,
     ContextNodeType,
-    ContextEvent,
-    ContextEventType,
     MorningBrief,
-    TierLevel,
 )
-from app.ledger.context_graph import ContextKnowledgeGraph
-from app.ledger.edit_delta import EditDeltaEngine
-from app.agents.morning_brief import MorningBriefAgent
-from app.dispatcher import ToolDispatcher, BridgeDisconnectedError, CapabilityVerificationError
-from app.tracing import get_trace_store, parse_traceparent, generate_trace_id, generate_span_id
-from enclave import get_policy_enclave, IdempotencyConflictError
-from capabilities import mint_capability_token
+from app.tracing import generate_span_id, generate_trace_id, get_trace_store
 
 logger = logging.getLogger("Orchestrator")
 logging.basicConfig(level=logging.INFO)
@@ -119,7 +115,7 @@ async def lifespan(app: FastAPI):
         )
         scheduler.start()
         logger.info(f"Overnight Chief-of-Staff scheduler started with cron '{cron_expr}'.")
-    except Exception as e:
+    except (ValueError, RuntimeError) as e:
         logger.warning(f"Could not start scheduler with cron '{cron_expr}': {e}")
 
     yield
@@ -132,7 +128,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="VibeCore / Context-Intuition Agent Swarm",
     description="Local-first, privacy-preserving personal agent swarm runtime.",
-    version="0.1.0",
+    version="0.3.0",
     lifespan=lifespan,
 )
 
@@ -149,14 +145,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Shared Singletons
-context_graph = ContextKnowledgeGraph()
-edit_delta_engine = EditDeltaEngine()
-policy_enclave = get_policy_enclave()
-tool_dispatcher = ToolDispatcher()
 
-
-async def handle_edit_delta(envelope: ActionEnvelope, revised_payload: Dict[str, Any]) -> None:
+async def handle_edit_delta(envelope: ActionEnvelope, revised_payload: dict[str, Any]) -> None:
     await edit_delta_engine.learn_from_edit(envelope, revised_payload)
 
 
@@ -174,7 +164,7 @@ MAX_WS_FRAME_SIZE = 1_048_576  # 1 MB max frame size
 MAX_BATCH_ITEMS = 200          # Max items per telemetry batch
 
 
-def is_allowed_origin(origin: Optional[str]) -> bool:
+def is_allowed_origin(origin: str | None) -> bool:
     """
     Validates WebSocket origin header against authorized clients and Chrome extension schemes.
     """
@@ -199,7 +189,7 @@ def sanitize_dom_payload(raw_content: Any) -> str:
     return f"<untrusted_dom_payload>\n{text}\n</untrusted_dom_payload>"
 
 
-def verify_ws_token(token: Optional[str]) -> bool:
+def verify_ws_token(token: str | None) -> bool:
     """
     Validates the handshake token using constant-time comparison to mitigate timing attacks.
     Rejects empty or missing tokens strictly.
@@ -218,8 +208,8 @@ def verify_ws_token(token: Optional[str]) -> bool:
 
 class ConnectionManager:
     def __init__(self):
-        self.browser_bridges: List[WebSocket] = []
-        self.dashboard_clients: List[WebSocket] = []
+        self.browser_bridges: list[WebSocket] = []
+        self.dashboard_clients: list[WebSocket] = []
 
     async def connect_browser(self, websocket: WebSocket) -> None:
         await websocket.accept()
@@ -243,10 +233,10 @@ class ConnectionManager:
 
     async def broadcast_to_dashboards(self, event_type: str, data: Any) -> None:
         payload = json.dumps({"event": event_type, "data": data})
-        for client in self.dashboard_clients:
+        for client in list(self.dashboard_clients):
             try:
                 await client.send_text(payload)
-            except Exception as e:
+            except (RuntimeError, WebSocketDisconnect, OSError) as e:
                 logger.warning(f"Error sending to dashboard: {e}")
 
     async def send_to_browser(self, message: BridgeMessage) -> None:
@@ -254,8 +244,11 @@ class ConnectionManager:
             logger.warning("No active browser bridges connected.")
             return
         payload = message.model_dump_json()
-        for bridge in self.browser_bridges:
-            await bridge.send_text(payload)
+        for bridge in list(self.browser_bridges):
+            try:
+                await bridge.send_text(payload)
+            except (RuntimeError, WebSocketDisconnect, OSError) as e:
+                logger.warning(f"Error sending to browser bridge: {e}")
 
 
 manager = ConnectionManager()
@@ -272,7 +265,7 @@ tool_dispatcher.set_browser_bridge(
 @app.websocket("/ws/browser-bridge")
 async def browser_bridge_endpoint(
     websocket: WebSocket,
-    token: Optional[str] = Query(None),
+    token: Annotated[str | None, Query()] = None,
 ):
     # Verify origin header
     origin = websocket.headers.get("origin")
@@ -304,7 +297,7 @@ async def browser_bridge_endpoint(
             try:
                 data = json.loads(raw_text)
                 message = BridgeMessage(**data)
-            except Exception as e:
+            except (json.JSONDecodeError, ValidationError, TypeError, ValueError) as e:
                 logger.warning(f"Malformed JSON/Message received: {e}")
                 await websocket.send_text(json.dumps({
                     "error": "MALFORMED_PAYLOAD",
@@ -434,7 +427,7 @@ async def browser_bridge_endpoint(
 @app.websocket("/ws/dashboard")
 async def dashboard_endpoint(
     websocket: WebSocket,
-    token: Optional[str] = Query(None),
+    token: Annotated[str | None, Query()] = None,
 ):
     # Verify origin header
     origin = websocket.headers.get("origin")
@@ -473,7 +466,7 @@ async def health_check():
     """
     return {
         "status": "healthy",
-        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "timestamp": datetime.now(UTC).isoformat(),
         "version": "0.3.0",
         "scheduler_running": scheduler.running,
         "browser_bridges_connected": len(manager.browser_bridges),
@@ -489,19 +482,19 @@ async def get_bridge_token_info():
     """
     return {
         "status": "active",
-        "token": settings.BRIDGE_TOKEN,
+        "token": get_or_create_bridge_token(),
         "hint": "Provide this token in ?token=<token> when establishing WebSocket connections.",
     }
 
 
 class ResolveActionRequest(BaseModel):
     status: ApprovalStatus
-    user_signature: Optional[str] = "sig_user_approved"
-    edited_payload: Optional[Dict[str, Any]] = None
-    user_feedback: Optional[str] = None
+    user_signature: str | None = "sig_user_approved"
+    edited_payload: dict[str, Any] | None = None
+    user_feedback: str | None = None
 
 
-@app.get("/api/approvals", response_model=List[ActionEnvelope])
+@app.get("/api/approvals", response_model=list[ActionEnvelope])
 async def list_pending_approvals():
     return policy_enclave.queue.list_pending()
 
@@ -519,9 +512,9 @@ async def resolve_approval(action_id: str, request: ResolveActionRequest):
         try:
             envelope = policy_enclave.queue.claim_for_execution(action_id)
         except IdempotencyConflictError as e:
-            raise HTTPException(status_code=409, detail=str(e))
+            raise HTTPException(status_code=409, detail=str(e)) from e
         except ValueError as e:
-            raise HTTPException(status_code=404, detail=str(e))
+            raise HTTPException(status_code=404, detail=str(e)) from e
 
         final_payload = (
             request.edited_payload
@@ -553,16 +546,16 @@ async def resolve_approval(action_id: str, request: ResolveActionRequest):
         except BridgeDisconnectedError as e:
             # Recoverable browser disconnection: revert action back to PENDING state
             policy_enclave.queue.revert_to_pending(action_id)
-            raise HTTPException(status_code=503, detail=str(e))
+            raise HTTPException(status_code=503, detail=str(e)) from e
         except CapabilityVerificationError as e:
             # Capability token verification failed - this should not happen for freshly minted tokens
             logger.error(f"Capability verification failed for {action_id}: {e}")
             policy_enclave.queue.revert_to_pending(action_id)
-            raise HTTPException(status_code=500, detail=f"Capability verification failed: {str(e)}")
+            raise HTTPException(status_code=500, detail=f"Capability verification failed: {e!s}") from e
         except Exception as e:
             logger.error(f"Execution error dispatching tool {envelope.tool_name}: {e}")
             policy_enclave.queue.revert_to_pending(action_id)
-            raise HTTPException(status_code=500, detail=f"Tool execution failed: {str(e)}")
+            raise HTTPException(status_code=500, detail=f"Tool execution failed: {e!s}") from e
 
         resolved = policy_enclave.queue.resolve(
             action_id=action_id,
@@ -582,9 +575,9 @@ async def resolve_approval(action_id: str, request: ResolveActionRequest):
                 user_feedback=request.user_feedback,
             )
         except IdempotencyConflictError as e:
-            raise HTTPException(status_code=409, detail=str(e))
+            raise HTTPException(status_code=409, detail=str(e)) from e
         except ValueError as e:
-            raise HTTPException(status_code=404, detail=str(e))
+            raise HTTPException(status_code=404, detail=str(e)) from e
 
     await manager.broadcast_to_dashboards("ACTION_RESOLVED", resolved.model_dump(mode="json"))
     return resolved
@@ -621,8 +614,8 @@ async def list_learned_rules():
 
 @app.get("/api/context/nodes")
 async def query_context_nodes(
-    node_type: Optional[ContextNodeType] = Query(None),
-    tag: Optional[str] = Query(None),
+    node_type: Annotated[ContextNodeType | None, Query()] = None,
+    tag: Annotated[str | None, Query()] = None,
 ):
     nodes = context_graph.find_nodes(node_type=node_type, tag=tag)
     return [n.model_dump(mode="json") for n in nodes]
@@ -649,28 +642,31 @@ async def replay_context_graph(as_of: str = Query(..., description="ISO8601 time
     Replays all events chronologically up to the given timestamp without mutating live tables.
     """
     try:
-        as_of_dt = datetime.fromisoformat(as_of.replace("Z", "+00:00"))
-    except ValueError:
-        raise HTTPException(status_code=400, detail="Invalid timestamp format. Use ISO8601 (e.g., 2024-01-15T10:30:00Z)")
-    
+        as_of_dt = datetime.fromisoformat(as_of)
+    except ValueError as e:
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid timestamp format. Use ISO8601 (e.g., 2024-01-15T10:30:00Z)",
+        ) from e
+
     nodes = context_graph.replay_until(as_of_dt)
     return [n.model_dump(mode="json") for n in nodes]
 
 
 @app.get("/api/context/search")
 async def search_context(
-    q: str = Query(..., min_length=1, description="Search query"),
-    limit: int = Query(10, ge=1, le=50),
-    semantic_weight: float = Query(0.6, ge=0.0, le=1.0),
-    node_type: Optional[ContextNodeType] = Query(None),
-    tag: Optional[str] = Query(None),
+    q: Annotated[str, Query(min_length=1, description="Search query")],
+    limit: Annotated[int, Query(ge=1, le=50)] = 10,
+    semantic_weight: Annotated[float, Query(ge=0.0, le=1.0)] = 0.6,
+    node_type: Annotated[ContextNodeType | None, Query()] = None,
+    tag: Annotated[str | None, Query()] = None,
 ):
     """
     Hybrid semantic + temporal search over the context graph.
-    
+
     Combines cosine similarity of query embedding with node embeddings
     and normalized temporal decayed relevance.
-    
+
     hybrid_score = semantic_weight * semantic_similarity + (1 - semantic_weight) * normalized_decayed_relevance
     """
     results = context_graph.search_hybrid(

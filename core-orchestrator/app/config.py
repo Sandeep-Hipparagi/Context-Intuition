@@ -5,11 +5,13 @@ Author: Sandeep Hipparagi (https://github.com/Sandeep-Hipparagi)
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 import secrets
 from pathlib import Path
-from typing import Optional
+
+logger = logging.getLogger("Config")
 
 
 # Profile name validation: alphanumeric, underscore, hyphen, 1-32 chars
@@ -33,7 +35,7 @@ def get_profile_name() -> str:
     return _validate_profile_name(profile)
 
 
-def get_vibecore_home(profile: Optional[str] = None) -> Path:
+def get_vibecore_home(profile: str | None = None) -> Path:
     """
     Returns the root directory for VibeCore runtime state, databases, and tokens.
     Defaults to ~/.vibecore/profiles/<profile> or VIBECORE_HOME if specified.
@@ -51,14 +53,14 @@ def get_vibecore_home(profile: Optional[str] = None) -> Path:
     return path
 
 
-def get_db_path(filename: str, profile: Optional[str] = None) -> Path:
+def get_db_path(filename: str, profile: str | None = None) -> Path:
     """
     Resolves the SQLite database path inside the VibeCore home directory for a profile.
     """
     return get_vibecore_home(profile) / filename
 
 
-def get_or_create_bridge_token(profile: Optional[str] = None) -> str:
+def get_or_create_bridge_token(profile: str | None = None) -> str:
     """
     Retrieves or generates an ephemeral authentication token for WebSocket bridges
     (Chrome Extension <-> Orchestrator and Dashboard <-> Orchestrator).
@@ -77,13 +79,13 @@ def get_or_create_bridge_token(profile: Optional[str] = None) -> str:
         token_file.write_text(token, encoding="utf-8")
         try:
             token_file.chmod(0o600)
-        except Exception:
-            pass
+        except OSError as exc:
+            logger.debug("Could not set permissions on %s: %s", token_file, exc)
 
     return token
 
 
-def get_or_create_capability_secret(profile: Optional[str] = None) -> Path:
+def get_or_create_capability_secret(profile: str | None = None) -> Path:
     """
     Returns path to capability signing secret for a profile.
     Secret is managed by CapabilityManager, this just ensures directory exists.
@@ -95,8 +97,6 @@ def get_or_create_capability_secret(profile: Optional[str] = None) -> Path:
 
 
 class Settings:
-    VIBECORE_HOME: Path = get_vibecore_home()
-    BRIDGE_TOKEN: str = get_or_create_bridge_token()
     LOCAL_LLM_URL: str = os.environ.get("LOCAL_LLM_URL", "http://localhost:11434")
     DEFAULT_CONFIDENCE_THRESHOLD: float = float(os.environ.get("CONFIDENCE_THRESHOLD", "0.80"))
     ORCHESTRATOR_HOST: str = os.environ.get("ORCHESTRATOR_HOST", "127.0.0.1")
@@ -109,7 +109,18 @@ class Settings:
     CLOUD_API_KEY: str = os.environ.get("VIBECORE_CLOUD_API_KEY", "")
     FAST_MODEL: str = os.environ.get("VIBECORE_FAST_MODEL", "qwen2.5:1.5b")
     REASONING_MODEL: str = os.environ.get("VIBECORE_REASONING_MODEL", "llama3.1:8b")
-    MOCK_LLM: bool = os.environ.get("VIBECORE_MOCK_LLM", "0") == "1"
+
+    @property
+    def VIBECORE_HOME(self) -> Path:
+        return get_vibecore_home()
+
+    @property
+    def BRIDGE_TOKEN(self) -> str:
+        return get_or_create_bridge_token()
+
+    @property
+    def MOCK_LLM(self) -> bool:
+        return os.environ.get("VIBECORE_MOCK_LLM", "0") == "1"
 
     # Wave 2: Multi-Profile Support
     @property

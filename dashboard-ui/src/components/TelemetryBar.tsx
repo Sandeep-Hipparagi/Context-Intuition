@@ -22,7 +22,7 @@ export const TelemetryBar: React.FC<TelemetryBarProps> = ({ wsState, pendingCoun
             <div className="flex items-center gap-2">
               <span className="font-bold text-base tracking-tight text-zinc-100">VibeCore</span>
               <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-zinc-800 text-zinc-400 border border-zinc-700">
-                v0.2.0
+                v0.3.0
               </span>
             </div>
             <p className="text-[11px] text-zinc-500 font-mono">Local-First Multi-Agent Runtime</p>

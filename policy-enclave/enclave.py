@@ -8,18 +8,17 @@ Deterministic guardrails, risk scoring, action suspension, and edit-delta trigge
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timezone
 import functools
 import inspect
 import json
 import logging
-import os
 import sqlite3
-from typing import Any, Callable, Coroutine, Dict, List, Optional, Tuple, TypeVar, cast
-from uuid import uuid4
-
 import sys
+from collections.abc import Callable, Coroutine
+from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any, TypeVar, cast
+from uuid import uuid4
 
 # Add project root to path for cross-module imports
 ROOT_DIR = Path(__file__).resolve().parent.parent
@@ -35,7 +34,8 @@ from app.schemas import (
     DiffPreview,
     TierLevel,
 )
-from policy_loader import get_policy_loader, PolicyLoader
+from capabilities import CapabilityVerificationError as CapabilityVerificationError
+from policy_loader import PolicyLoader, get_policy_loader
 
 logger = logging.getLogger("PolicyEnclave")
 logging.basicConfig(level=logging.INFO)
@@ -60,7 +60,6 @@ class PolicyViolationException(Exception):
     """
     Raised when an agent attempts an explicitly prohibited operation.
     """
-    pass
 
 
 class IdempotencyConflictError(Exception):
@@ -68,14 +67,6 @@ class IdempotencyConflictError(Exception):
     Raised when an attempt is made to resolve an action that has already
     been resolved (i.e. status is not PENDING). Prevents duplicate executions.
     """
-    pass
-
-
-class CapabilityVerificationError(Exception):
-    """
-    Raised when a capability token is missing, invalid, expired, or already consumed.
-    """
-    pass
 
 
 class ApprovalQueue:
@@ -84,9 +75,9 @@ class ApprovalQueue:
     Stores pending envelopes in SQLite with WAL mode and notifies listeners via async futures.
     """
 
-    def __init__(self, db_path: Optional[str] = None):
+    def __init__(self, db_path: str | None = None):
         self.db_path = db_path or str(get_db_path("enclave_approvals.db"))
-        self._pending_futures: Dict[str, asyncio.Future[ActionEnvelope]] = {}
+        self._pending_futures: dict[str, asyncio.Future[ActionEnvelope]] = {}
         self._init_db()
 
     def _get_connection(self) -> sqlite3.Connection:
@@ -125,8 +116,8 @@ class ApprovalQueue:
                 conn.execute("ALTER TABLE approval_queue ADD COLUMN execution_result TEXT")
             conn.commit()
 
-    def enqueue(self, envelope: ActionEnvelope) -> Optional[asyncio.Future[ActionEnvelope]]:
-        future: Optional[asyncio.Future[ActionEnvelope]] = None
+    def enqueue(self, envelope: ActionEnvelope) -> asyncio.Future[ActionEnvelope] | None:
+        future: asyncio.Future[ActionEnvelope] | None = None
         try:
             loop = asyncio.get_running_loop()
             future = loop.create_future()
@@ -170,7 +161,7 @@ class ApprovalQueue:
         )
         return future
 
-    def get(self, action_id: str) -> Optional[ActionEnvelope]:
+    def get(self, action_id: str) -> ActionEnvelope | None:
         with self._get_connection() as conn:
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
@@ -180,7 +171,7 @@ class ApprovalQueue:
                 return None
             return self._row_to_envelope(row)
 
-    def list_pending(self) -> List[ActionEnvelope]:
+    def list_pending(self) -> list[ActionEnvelope]:
         with self._get_connection() as conn:
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
@@ -194,7 +185,7 @@ class ApprovalQueue:
         Raises IdempotencyConflictError if the action was already claimed or resolved,
         preventing TOCTOU double-execution race conditions.
         """
-        now_str = datetime.now(timezone.utc).isoformat()
+        now_str = datetime.now(UTC).isoformat()
         with self._get_connection() as conn:
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
@@ -238,16 +229,16 @@ class ApprovalQueue:
         self,
         action_id: str,
         status: ApprovalStatus,
-        user_signature: Optional[str] = None,
-        edited_payload: Optional[Dict[str, Any]] = None,
-        user_feedback: Optional[str] = None,
-        execution_result: Optional[Dict[str, Any]] = None,
+        user_signature: str | None = None,
+        edited_payload: dict[str, Any] | None = None,
+        user_feedback: str | None = None,
+        execution_result: dict[str, Any] | None = None,
     ) -> ActionEnvelope:
         envelope = self.get(action_id)
         if not envelope:
             raise ValueError(f"Action {action_id} not found in approval queue.")
 
-        resolved_time = datetime.now(timezone.utc)
+        resolved_time = datetime.now(UTC)
         final_payload = edited_payload if edited_payload is not None else envelope.payload
 
         with self._get_connection() as conn:
@@ -300,7 +291,12 @@ class ApprovalQueue:
     def _row_to_envelope(self, row: sqlite3.Row) -> ActionEnvelope:
         diff_data = json.loads(row["diff_preview"]) if row["diff_preview"] else None
         diff_preview = DiffPreview(**diff_data) if diff_data else None
-        exec_res = json.loads(row["execution_result"]) if ("execution_result" in row.keys() and row["execution_result"]) else None
+        row_keys = set(row.keys())
+        exec_res = (
+            json.loads(row["execution_result"])
+            if ("execution_result" in row_keys and row["execution_result"])
+            else None
+        )
 
         return ActionEnvelope(
             action_id=row["action_id"],
@@ -327,21 +323,21 @@ class PolicyEnclave:
     Uses declarative policy from policy.yaml with hot-reload support.
     """
 
-    def __init__(self, db_path: Optional[str] = None, policy_loader: Optional[PolicyLoader] = None):
+    def __init__(self, db_path: str | None = None, policy_loader: PolicyLoader | None = None):
         self.queue = ApprovalQueue(db_path=db_path)
-        self.edit_delta_callback: Optional[Callable[[ActionEnvelope, Dict[str, Any]], Coroutine[Any, Any, None]]] = None
+        self.edit_delta_callback: Callable[[ActionEnvelope, dict[str, Any]], Coroutine[Any, Any, None]] | None = None
         self._policy_loader = policy_loader or get_policy_loader()
 
     def register_edit_delta_callback(
         self,
-        callback: Callable[[ActionEnvelope, Dict[str, Any]], Coroutine[Any, Any, None]]
+        callback: Callable[[ActionEnvelope, dict[str, Any]], Coroutine[Any, Any, None]]
     ) -> None:
         """
         Subscribes the EditDeltaEngine to capture user modifications to staged drafts.
         """
         self.edit_delta_callback = callback
 
-    def evaluate_risk(self, tool_name: str, payload: Dict[str, Any]) -> Tuple[TierLevel, float, List[str]]:
+    def evaluate_risk(self, tool_name: str, payload: dict[str, Any]) -> tuple[TierLevel, float, list[str]]:
         """
         Calculates dynamic risk score and enforces tier classification using declarative policy.
         """
@@ -358,10 +354,10 @@ class PolicyEnclave:
     def prepare_envelope(
         self,
         tool_name: str,
-        payload: Dict[str, Any],
+        payload: dict[str, Any],
         agent_id: str,
         session_id: str,
-        diff_preview: Optional[DiffPreview] = None,
+        diff_preview: DiffPreview | None = None,
     ) -> ActionEnvelope:
         tier, risk_score, risk_factors = self.evaluate_risk(tool_name, payload)
 
@@ -376,14 +372,14 @@ class PolicyEnclave:
             payload=payload,
             diff_preview=diff_preview,
             status=ApprovalStatus.PENDING,
-            created_at=datetime.now(timezone.utc),
+            created_at=datetime.now(UTC),
         )
 
     async def execute_or_suspend(
         self,
         envelope: ActionEnvelope,
         execution_func: Callable[[], Coroutine[Any, Any, Any]],
-        await_approval_timeout: Optional[float] = None,
+        await_approval_timeout: float | None = None,
     ) -> Any:
         """
         Intercepts tool execution:
@@ -397,13 +393,15 @@ class PolicyEnclave:
 
         if envelope.tier in (TierLevel.TIER_0_OBSERVE, TierLevel.TIER_1_STAGE):
             envelope.status = ApprovalStatus.APPROVED
-            envelope.resolved_at = datetime.now(timezone.utc)
+            envelope.resolved_at = datetime.now(UTC)
             return await execution_func()
 
         # TIER_2_COMMIT without valid signature -> Suspend
         future = self.queue.enqueue(envelope)
 
         if await_approval_timeout is not None and await_approval_timeout > 0:
+            if future is None:
+                raise ActionSuspendedException(envelope)
             logger.info(f"Awaiting approval for {envelope.action_id} up to {await_approval_timeout}s...")
             try:
                 resolved_envelope = await asyncio.wait_for(future, timeout=await_approval_timeout)
@@ -414,8 +412,8 @@ class PolicyEnclave:
                     return await execution_func()
                 else:
                     raise PermissionError(f"Action {envelope.action_id} was rejected by user.")
-            except asyncio.TimeoutError:
-                raise ActionSuspendedException(envelope)
+            except TimeoutError as exc:
+                raise ActionSuspendedException(envelope) from exc
 
         raise ActionSuspendedException(envelope)
 
@@ -423,7 +421,7 @@ class PolicyEnclave:
         self,
         action_id: str,
         tool_name: str,
-        payload: Dict[str, Any],
+        payload: dict[str, Any],
         expires_in: int = 60,
     ) -> str:
         """
@@ -433,15 +431,16 @@ class PolicyEnclave:
         from capabilities import mint_capability_token
         return mint_capability_token(action_id, tool_name, payload, expires_in)
 
-    def verify_capability_token(self, token: str, tool_name: str, payload: Dict[str, Any]) -> bool:
+    def verify_capability_token(self, token: str, tool_name: str, payload: dict[str, Any]) -> bool:
         """
         Verify a capability token for execution authorization.
         """
         from capabilities import verify_capability_token
-        return verify_capability_token(token, tool_name, payload)
+        verify_capability_token(token, tool_name, payload)
+        return True
 
     @property
-    def TOOL_CLASSIFICATIONS(self) -> Dict[str, TierLevel]:
+    def TOOL_CLASSIFICATIONS(self) -> dict[str, TierLevel]:
         """
         Backward compatibility property: returns tool classifications from declarative policy.
         Allows dynamic registration of new tools for testing.
@@ -451,7 +450,7 @@ class PolicyEnclave:
         return {tool_name: tool_policy.tier for tool_name, tool_policy in policy.tools.items()}
 
     @TOOL_CLASSIFICATIONS.setter
-    def TOOL_CLASSIFICATIONS(self, value: Dict[str, TierLevel]) -> None:
+    def TOOL_CLASSIFICATIONS(self, value: dict[str, TierLevel]) -> None:
         """
         Allow setting tool classifications for testing (delegates to policy.yaml via policy loader).
         Note: This only works for tools already defined in policy.yaml or will be ignored.
@@ -459,7 +458,6 @@ class PolicyEnclave:
         """
         # For backward compatibility with tests that set TOOL_CLASSIFICATIONS
         # We'll update the in-memory policy loader's config
-        pass
 
 
 AUTHORIZED_EXECUTION_SIGNATURES = {
@@ -468,7 +466,7 @@ AUTHORIZED_EXECUTION_SIGNATURES = {
 }
 
 
-def is_authorized_signature(signature: Optional[str]) -> bool:
+def is_authorized_signature(signature: str | None) -> bool:
     """
     Validates that a provided user signature is authorized by the Policy Enclave
     before bypassing execution suspension.
@@ -487,9 +485,9 @@ def get_policy_enclave() -> PolicyEnclave:
 
 
 def enforce_policy(
-    tool_name: Optional[str] = None,
-    tier: Optional[TierLevel] = None,
-    await_approval_timeout: Optional[float] = None,
+    tool_name: str | None = None,
+    tier: TierLevel | None = None,
+    await_approval_timeout: float | None = None,
 ) -> Callable[[F], F]:
     """
     Decorator for swarm tool functions to enforce deterministic policy and HITL guardrails.

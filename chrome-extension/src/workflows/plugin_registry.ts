@@ -217,9 +217,14 @@ const whatsappPlugin: WorkflowPlugin = {
   ],
 
   onMount: async (ctx) => {
+    const existing = (window as any).__whatsappWorkflow as WhatsAppCopilotWorkflow | undefined;
+    if (existing) {
+      existing.stopObservation();
+    }
     const workflow = new WhatsAppCopilotWorkflow((msg) => {
       ctx.sendTelemetry('WHATSAPP_INCOMING_MESSAGE', toRecord(msg));
     });
+    (window as any).__whatsappWorkflow = workflow;
     workflow.startObservation();
     console.log('[WhatsAppPlugin] Mounted and observing');
   },
@@ -270,6 +275,7 @@ const groceryPlugin: WorkflowPlugin = {
 
   onMount: async (ctx) => {
     const workflow = new GroceryTrackerWorkflow();
+    (window as any).__groceryWorkflow = workflow;
     // Initial scan
     setTimeout(() => {
       const snapshot = workflow.extractProductSnapshot();
@@ -318,14 +324,19 @@ const instagramPlugin: WorkflowPlugin = {
   ],
 
   onMount: async (ctx) => {
+    const existing = (window as any).__instagramWorkflow as InstagramArchivistWorkflow | undefined;
+    if (existing) {
+      existing.stopArchiving();
+    }
     const workflow = new InstagramArchivistWorkflow((batch) => {
       ctx.sendTelemetry('INSTAGRAM_SAVED_BATCH', toRecord({ items: batch }));
     });
+    (window as any).__instagramWorkflow = workflow;
     await workflow.startArchiving();
     console.log('[InstagramPlugin] Mounted and archiving');
   },
 
-  onCommand: (command, payload) => {
+  onCommand: (command, _payload) => {
     const workflow = (window as any).__instagramWorkflow;
     if (!workflow) {
       return { success: false, message: 'Instagram workflow not initialized' };
@@ -341,6 +352,10 @@ const instagramPlugin: WorkflowPlugin = {
   },
 
   onUnmount: async () => {
+    const workflow = (window as any).__instagramWorkflow as InstagramArchivistWorkflow | undefined;
+    if (workflow) {
+      workflow.stopArchiving();
+    }
     console.log('[InstagramPlugin] Unmounted');
   },
 };

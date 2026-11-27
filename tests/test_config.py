@@ -3,8 +3,7 @@ Unit tests for VibeCore configuration and directory management.
 Author: Sandeep Hipparagi (https://github.com/Sandeep-Hipparagi)
 """
 
-from pathlib import Path
-from app.config import get_vibecore_home, get_db_path, get_or_create_bridge_token, get_profile_name
+from app.config import get_db_path, get_or_create_bridge_token, get_profile_name, get_vibecore_home
 
 
 def test_vibecore_home_isolated(isolated_vibecore_home):
@@ -28,8 +27,8 @@ def test_bridge_token_resolution():
 
 
 def test_api_health_endpoint():
-    from fastapi.testclient import TestClient
     from app.main import app
+    from fastapi.testclient import TestClient
 
     client = TestClient(app)
     response = client.get("/api/health")

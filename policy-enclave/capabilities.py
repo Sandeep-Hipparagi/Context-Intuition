@@ -12,14 +12,13 @@ import hashlib
 import hmac
 import json
 import logging
-import os
 import secrets
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any
 
-from app.config import get_vibecore_home
+from app.config import get_or_create_capability_secret, get_vibecore_home
 
 logger = logging.getLogger("Capabilities")
 
@@ -39,7 +38,7 @@ class CapabilityToken:
     def is_expired(self) -> bool:
         return int(time.time()) >= self.expires_at
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "action_id": self.action_id,
             "tool_name": self.tool_name,
@@ -49,7 +48,7 @@ class CapabilityToken:
         }
 
     @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> "CapabilityToken":
+    def from_dict(cls, data: dict[str, Any]) -> CapabilityToken:
         return cls(
             action_id=data["action_id"],
             tool_name=data["tool_name"],
@@ -67,15 +66,12 @@ class CapabilityManager:
 
     def __init__(self, profile: str = "default"):
         self.profile = profile
-        self._secret: Optional[bytes] = None
+        self._secret: bytes | None = None
         self._used_nonces: set[str] = set()  # In-memory replay protection
 
     def _get_secret_path(self) -> Path:
         """Get path to capability secret for current profile."""
-        vibecore_home = get_vibecore_home()
-        profile_dir = vibecore_home / "profiles" / self.profile
-        profile_dir.mkdir(parents=True, exist_ok=True)
-        return profile_dir / "capability.key"
+        return get_or_create_capability_secret(self.profile)
 
     def _load_or_create_secret(self) -> bytes:
         """Load existing secret or generate new one."""
@@ -91,21 +87,21 @@ class CapabilityManager:
                 secret_path.write_bytes(secret)
                 try:
                     secret_path.chmod(0o600)
-                except Exception:
-                    pass
+                except OSError as exc:
+                    logger.debug("Could not set permissions on %s: %s", secret_path, exc)
         else:
             secret = secrets.token_bytes(32)
             secret_path.write_bytes(secret)
             try:
                 secret_path.chmod(0o600)
-            except Exception:
-                pass
+            except OSError as exc:
+                logger.debug("Could not set permissions on %s: %s", secret_path, exc)
             logger.info(f"Generated new capability secret at {secret_path}")
 
         self._secret = secret
         return secret
 
-    def _canonical_payload_hash(self, payload: Dict[str, Any]) -> str:
+    def _canonical_payload_hash(self, payload: dict[str, Any]) -> str:
         """Compute canonical SHA-256 hash of payload (sorted keys, no whitespace)."""
         canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
         return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
@@ -115,7 +111,7 @@ class CapabilityManager:
         data = json.dumps(token.to_dict(), separators=(",", ":")).encode("utf-8")
         return base64.urlsafe_b64encode(data).decode("ascii").rstrip("=")
 
-    def _decode_payload(self, encoded: str) -> Dict[str, Any]:
+    def _decode_payload(self, encoded: str) -> dict[str, Any]:
         """Decode base64url JSON payload."""
         # Add padding if needed
         padding = "=" * (-len(encoded) % 4)
@@ -139,7 +135,7 @@ class CapabilityManager:
         self,
         action_id: str,
         tool_name: str,
-        payload: Dict[str, Any],
+        payload: dict[str, Any],
         expires_in: int = 60,
     ) -> str:
         """
@@ -166,7 +162,7 @@ class CapabilityManager:
         self,
         token_str: str,
         tool_name: str,
-        payload: Dict[str, Any],
+        payload: dict[str, Any],
     ) -> CapabilityToken:
         """
         Verify a capability token.
@@ -185,8 +181,8 @@ class CapabilityManager:
         try:
             data = self._decode_payload(payload_b64)
             token = CapabilityToken.from_dict(data)
-        except Exception as e:
-            raise CapabilityVerificationError(f"Invalid payload: {e}")
+        except (ValueError, KeyError, TypeError, json.JSONDecodeError) as e:
+            raise CapabilityVerificationError(f"Invalid payload: {e}") from e
 
         # Check expiration
         if token.is_expired():
@@ -218,21 +214,21 @@ class CapabilityManager:
         return 0
 
 
-# Global manager per profile
-_managers: Dict[str, CapabilityManager] = {}
+# Global manager per (profile, home)
+_managers: dict[tuple[str, str], CapabilityManager] = {}
 
 
 def get_capability_manager(profile: str = "default") -> CapabilityManager:
-    global _managers
-    if profile not in _managers:
-        _managers[profile] = CapabilityManager(profile)
-    return _managers[profile]
+    key = (profile, str(get_vibecore_home(profile)))
+    if key not in _managers:
+        _managers[key] = CapabilityManager(profile)
+    return _managers[key]
 
 
 def mint_capability_token(
     action_id: str,
     tool_name: str,
-    payload: Dict[str, Any],
+    payload: dict[str, Any],
     expires_in: int = 60,
     profile: str = "default",
 ) -> str:
@@ -244,7 +240,7 @@ def mint_capability_token(
 def verify_capability_token(
     token_str: str,
     tool_name: str,
-    payload: Dict[str, Any],
+    payload: dict[str, Any],
     profile: str = "default",
 ) -> CapabilityToken:
     """Verify a capability token using the profile's manager."""
@@ -254,4 +250,3 @@ def verify_capability_token(
 
 class CapabilityVerificationError(Exception):
     """Raised when capability token verification fails."""
-    pass

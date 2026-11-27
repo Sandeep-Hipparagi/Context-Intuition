@@ -8,12 +8,12 @@ behavioral edit-delta playbook, zero-trust policy enclave, and agent RPC envelop
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from enum import Enum
-from typing import Any, Dict, List, Optional
-from uuid import UUID, uuid4
-from pydantic import BaseModel, Field, field_validator
+from typing import Any
+from uuid import uuid4
 
+from pydantic import BaseModel, Field
 
 # ============================================================================
 # 1. Zero-Trust Policy & Guardrail Enums
@@ -57,8 +57,8 @@ class ContextEdge(BaseModel):
     target_id: str
     relation: str = Field(..., description="Semantic relation, e.g., 'CONTRADICTS', 'PREFERS', 'PART_OF'")
     weight: float = Field(default=1.0, ge=0.0, le=1.0)
-    metadata: Dict[str, Any] = Field(default_factory=dict)
-    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
 
 class ContextEventType(str, Enum):
@@ -78,10 +78,10 @@ class ContextEvent(BaseModel):
     event_id: str = Field(default_factory=lambda: str(uuid4()))
     node_id: str
     event_type: ContextEventType
-    delta_payload: Dict[str, Any] = Field(default_factory=dict, description="The change that was applied")
-    agent_id: Optional[str] = Field(default=None, description="Agent that triggered this event")
-    trace_id: Optional[str] = Field(default=None, description="W3C traceparent trace_id for distributed tracing")
-    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    delta_payload: dict[str, Any] = Field(default_factory=dict, description="The change that was applied")
+    agent_id: str | None = Field(default=None, description="Agent that triggered this event")
+    trace_id: str | None = Field(default=None, description="W3C traceparent trace_id for distributed tracing")
+    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
 
 class ContextNode(BaseModel):
@@ -92,23 +92,23 @@ class ContextNode(BaseModel):
     node_id: str = Field(default_factory=lambda: str(uuid4()))
     node_type: ContextNodeType
     title: str = Field(..., max_length=256)
-    content: Dict[str, Any] = Field(default_factory=dict, description="Structured payload or text entity attributes")
-    embedding: Optional[List[float]] = Field(default=None, description="Dense vector embedding for semantic search")
+    content: dict[str, Any] = Field(default_factory=dict, description="Structured payload or text entity attributes")
+    embedding: list[float] | None = Field(default=None, description="Dense vector embedding for semantic search")
     confidence: float = Field(default=1.0, ge=0.0, le=1.0, description="Epistemic certainty")
     decay_rate: float = Field(default=0.05, ge=0.0, le=1.0, description="Decay factor per day for nightly consolidation")
     access_count: int = Field(default=0)
-    last_accessed: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
-    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
-    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    last_accessed: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     source: str = Field(..., description="Originating agent or telemetry pipeline (e.g. 'edit_delta_whatsapp')")
-    tags: List[str] = Field(default_factory=list)
-    edges: List[ContextEdge] = Field(default_factory=list)
+    tags: list[str] = Field(default_factory=list)
+    edges: list[ContextEdge] = Field(default_factory=list)
 
-    def compute_decayed_relevance(self, as_of: Optional[datetime] = None) -> float:
+    def compute_decayed_relevance(self, as_of: datetime | None = None) -> float:
         """
         Computes current relevance score given elapsed time and reinforcement frequency.
         """
-        ref_time = as_of or datetime.now(timezone.utc)
+        ref_time = as_of or datetime.now(UTC)
         elapsed_days = max(0.0, (ref_time - self.last_accessed).total_seconds() / 86400.0)
         # Standard half-life decay formula reinforced by access frequency
         reinforcement_boost = min(2.0, 1.0 + (0.1 * self.access_count))
@@ -133,13 +133,13 @@ class BehavioralRule(BaseModel):
     category: BehavioralCategory
     trigger_pattern: str = Field(..., description="Condition under which this rule fires (e.g. 'recipient == investor')")
     action_directive: str = Field(..., description="Implicit preference instruction (e.g. 'Use concise bullet points, no pleasantries')")
-    original_draft_sample: Optional[str] = None
-    user_revised_sample: Optional[str] = None
+    original_draft_sample: str | None = None
+    user_revised_sample: str | None = None
     inferred_delta_rationale: str = Field(..., description="Why the semantic shift occurred based on the edit diff")
     weight: float = Field(default=1.0, ge=0.1, le=5.0, description="Confidence/strength of this learned heuristic")
     reinforcement_count: int = Field(default=1)
-    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
-    last_triggered_at: Optional[datetime] = None
+    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    last_triggered_at: datetime | None = None
 
 
 # ============================================================================
@@ -151,10 +151,10 @@ class DiffPreview(BaseModel):
     Visual and semantic comparison presented in the dashboard or mobile push
     before approving a TIER_2_COMMIT action.
     """
-    original: Optional[str] = None
-    proposed: Optional[str] = None
-    structured_diff: Optional[Dict[str, Any]] = None
-    affected_resource: Optional[str] = None
+    original: str | None = None
+    proposed: str | None = None
+    structured_diff: dict[str, Any] | None = None
+    affected_resource: str | None = None
 
 
 class ActionEnvelope(BaseModel):
@@ -168,17 +168,17 @@ class ActionEnvelope(BaseModel):
     tool_name: str = Field(..., description="Canonical tool name (e.g. 'gmail_send', 'checkout_cart')")
     tier: TierLevel
     risk_score: float = Field(default=0.0, ge=0.0, le=1.0)
-    risk_factors: List[str] = Field(default_factory=list, description="Audit trail justifying tier & risk calculation")
-    payload: Dict[str, Any] = Field(..., description="Tool arguments and parameters")
-    diff_preview: Optional[DiffPreview] = None
+    risk_factors: list[str] = Field(default_factory=list, description="Audit trail justifying tier & risk calculation")
+    payload: dict[str, Any] = Field(..., description="Tool arguments and parameters")
+    diff_preview: DiffPreview | None = None
     status: ApprovalStatus = Field(default=ApprovalStatus.PENDING)
-    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
-    resolved_at: Optional[datetime] = None
-    user_signature: Optional[str] = Field(default=None, description="Cryptographic signature or token approving action")
-    user_feedback: Optional[str] = Field(default=None, description="Optional user corrections or instructions")
-    execution_result: Optional[Dict[str, Any]] = Field(default=None, description="Telemetry/output from post-approval execution")
-    trace_id: Optional[str] = Field(default=None, description="W3C traceparent trace_id for end-to-end distributed tracing")
-    span_id: Optional[str] = Field(default=None, description="W3C traceparent span_id for this operation")
+    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    resolved_at: datetime | None = None
+    user_signature: str | None = Field(default=None, description="Cryptographic signature or token approving action")
+    user_feedback: str | None = Field(default=None, description="Optional user corrections or instructions")
+    execution_result: dict[str, Any] | None = Field(default=None, description="Telemetry/output from post-approval execution")
+    trace_id: str | None = Field(default=None, description="W3C traceparent trace_id for end-to-end distributed tracing")
+    span_id: str | None = Field(default=None, description="W3C traceparent span_id for this operation")
 
 
 # ============================================================================
@@ -196,17 +196,18 @@ class BridgeMessageType(str, Enum):
     DOM_GROCERY_SNAPSHOT = "DOM_GROCERY_SNAPSHOT"
     WHATSAPP_INCOMING_MESSAGE = "WHATSAPP_INCOMING_MESSAGE"
     INSTAGRAM_SAVED_BATCH = "INSTAGRAM_SAVED_BATCH"
+    SELECTOR_CANARY_WARNING = "SELECTOR_CANARY_WARNING"
     ERROR = "ERROR"
 
 
 class BridgeMessage(BaseModel):
     message_id: str = Field(default_factory=lambda: str(uuid4()))
     msg_type: BridgeMessageType
-    tab_id: Optional[int] = None
-    url: Optional[str] = None
-    payload: Dict[str, Any] = Field(default_factory=dict)
-    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
-    metadata: Optional[Dict[str, Any]] = Field(default_factory=dict, description="Optional metadata including trace_id, span_id for distributed tracing")
+    tab_id: int | None = None
+    url: str | None = None
+    payload: dict[str, Any] = Field(default_factory=dict)
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    metadata: dict[str, Any] | None = Field(default_factory=dict, description="Optional metadata including trace_id, span_id for distributed tracing")
 
 
 # ============================================================================
@@ -225,9 +226,9 @@ class CommitmentItem(BaseModel):
     source: str = Field(..., description="'gmail' | 'calendar' | 'whatsapp'")
     summary: str
     counterparty: str
-    due_datetime: Optional[datetime] = None
+    due_datetime: datetime | None = None
     confidence: float
-    staged_reply_action_id: Optional[str] = None
+    staged_reply_action_id: str | None = None
 
 
 class ScheduleConflict(BaseModel):
@@ -248,11 +249,11 @@ class TechRadarItem(BaseModel):
 
 class MorningBrief(BaseModel):
     brief_id: str = Field(default_factory=lambda: str(uuid4()))
-    generated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    generated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     window_hours: int = 72
     executive_summary: str
-    commitments_detected: List[CommitmentItem] = Field(default_factory=list)
-    schedule_conflicts: List[ScheduleConflict] = Field(default_factory=list)
-    pending_approvals: List[ActionEnvelope] = Field(default_factory=list)
-    tech_radar: List[TechRadarItem] = Field(default_factory=list)
-    subscription_alerts: List[str] = Field(default_factory=list)
+    commitments_detected: list[CommitmentItem] = Field(default_factory=list)
+    schedule_conflicts: list[ScheduleConflict] = Field(default_factory=list)
+    pending_approvals: list[ActionEnvelope] = Field(default_factory=list)
+    tech_radar: list[TechRadarItem] = Field(default_factory=list)
+    subscription_alerts: list[str] = Field(default_factory=list)

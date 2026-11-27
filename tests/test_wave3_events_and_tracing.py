@@ -3,35 +3,27 @@ Wave 3 Tests: Event-Sourced Context Graph & End-to-End Distributed Tracing.
 Author: Sandeep Hipparagi (https://github.com/Sandeep-Hipparagi)
 """
 
-import json
 import os
 import time
-from datetime import datetime, timezone, timedelta
-from unittest.mock import AsyncMock, MagicMock, patch
+from datetime import UTC, datetime, timedelta
 
 import pytest
-import httpx
-
 from app.ledger.context_graph import ContextKnowledgeGraph
 from app.schemas import (
+    ActionEnvelope,
+    ContextEventType,
     ContextNode,
     ContextNodeType,
-    ContextEvent,
-    ContextEventType,
-    ActionEnvelope,
-    ApprovalStatus,
     TierLevel,
 )
-from app.main import app, context_graph, frame_deduplicator
 from app.tracing import (
-    TraceStore,
-    TraceSpan,
     Tracer,
-    generate_trace_id,
-    generate_span_id,
-    parse_traceparent,
+    TraceSpan,
     format_traceparent,
+    generate_span_id,
+    generate_trace_id,
     init_trace_store,
+    parse_traceparent,
 )
 
 
@@ -53,9 +45,9 @@ class TestContextGraphEventSourcing:
             source="test_agent",
             tags=["test"],
         )
-        
+
         event = graph.upsert_node(node, agent_id="test_agent", trace_id="trace-123")
-        
+
         assert event is not None
         assert event.event_type == ContextEventType.NODE_CREATED
         assert event.node_id == "test-node-1"
@@ -75,13 +67,13 @@ class TestContextGraphEventSourcing:
             tags=["test"],
         )
         graph.upsert_node(node, agent_id="test_agent")
-        
+
         # Update the node
         node.title = "Updated Title"
         node.content = {"data": "updated"}
-        node.updated_at = datetime.now(timezone.utc)
+        node.updated_at = datetime.now(UTC)
         event = graph.upsert_node(node, agent_id="test_agent")
-        
+
         assert event is not None
         assert event.event_type == ContextEventType.NODE_UPDATED
         assert event.delta_payload["title"] == "Updated Title"
@@ -98,22 +90,22 @@ class TestContextGraphEventSourcing:
             tags=["test"],
         )
         graph.upsert_node(node, agent_id="test_agent")
-        
+
         # Update multiple times
         for i in range(2, 5):
             node.title = f"Step {i}"
             node.content = {"step": i}
-            node.updated_at = datetime.now(timezone.utc)
+            node.updated_at = datetime.now(UTC)
             graph.upsert_node(node, agent_id="test_agent")
-        
+
         history = graph.get_node_history("test-node-3")
-        
+
         assert len(history) == 4  # 1 created + 3 updates
         assert history[0].event_type == ContextEventType.NODE_CREATED
         assert history[1].event_type == ContextEventType.NODE_UPDATED
         assert history[2].event_type == ContextEventType.NODE_UPDATED
         assert history[3].event_type == ContextEventType.NODE_UPDATED
-        
+
         # Verify chronological order
         for i in range(len(history) - 1):
             assert history[i].created_at <= history[i + 1].created_at
@@ -130,9 +122,9 @@ class TestContextGraphEventSourcing:
             tags=["test"],
         )
         graph.upsert_node(node, agent_id="test_agent")
-        
+
         event = graph.touch_node("test-node-4", agent_id="reinforcer", trace_id="trace-456")
-        
+
         assert event is not None
         assert event.event_type == ContextEventType.CONFIDENCE_REINFORCED
         assert event.agent_id == "reinforcer"
@@ -141,7 +133,7 @@ class TestContextGraphEventSourcing:
     def test_nightly_consolidation_creates_pruned_events(self, graph):
         """Test that nightly consolidation appends NODE_PRUNED events for stale nodes."""
         # Create an old, low-relevance node
-        old_time = datetime.now(timezone.utc) - timedelta(days=30)
+        old_time = datetime.now(UTC) - timedelta(days=30)
         node = ContextNode(
             node_id="stale-node-1",
             node_type=ContextNodeType.FACT,
@@ -155,12 +147,12 @@ class TestContextGraphEventSourcing:
             tags=["test"],
         )
         graph.upsert_node(node, agent_id="test_agent")
-        
+
         # Run consolidation with high threshold to force pruning
         result = graph.nightly_consolidation(decay_threshold=0.5)
-        
+
         assert result["pruned"] >= 1
-        
+
         # Verify NODE_PRUNED event was created
         history = graph.get_node_history("stale-node-1")
         pruned_events = [e for e in history if e.event_type == ContextEventType.NODE_PRUNED]
@@ -179,10 +171,10 @@ class TestContextGraphEventSourcing:
             tags=["test"],
         )
         event = graph.upsert_node(node, agent_id="test_agent")
-        
+
         # Try to modify the event (should not affect stored event)
         event.delta_payload["tampered"] = True
-        
+
         # Re-fetch history - original should be unchanged
         history = graph.get_node_history("immutable-test")
         assert "tampered" not in history[0].delta_payload
@@ -197,8 +189,8 @@ class TestContextGraphReplay:
 
     def test_replay_until_reconstructs_state(self, graph):
         """Test that replay_until reconstructs exact state at a given timestamp."""
-        base_time = datetime.now(timezone.utc)
-        
+        base_time = datetime.now(UTC)
+
         # Create node
         node = ContextNode(
             node_id="replay-node-1",
@@ -212,18 +204,18 @@ class TestContextGraphReplay:
             tags=["test"],
         )
         graph.upsert_node(node, agent_id="test_agent")
-        
+
         # Wait a bit and update
         time.sleep(0.01)
-        update_time = datetime.now(timezone.utc)
+        update_time = datetime.now(UTC)
         node.title = "Updated"
         node.content = {"version": 2}
         node.updated_at = update_time
         graph.upsert_node(node, agent_id="test_agent")
-        
+
         # Replay to before update
         replayed = graph.replay_until(update_time - timedelta(milliseconds=5))
-        
+
         replayed_node = next((n for n in replayed if n.node_id == "replay-node-1"), None)
         assert replayed_node is not None
         assert replayed_node.title == "Original"
@@ -241,16 +233,16 @@ class TestContextGraphReplay:
             tags=["test"],
         )
         graph.upsert_node(node, agent_id="test_agent")
-        
+
         node.title = "Updated"
         node.content = {"version": 2}
-        node.updated_at = datetime.now(timezone.utc)
+        node.updated_at = datetime.now(UTC)
         graph.upsert_node(node, agent_id="test_agent")
-        
+
         # Replay to future time
-        future = datetime.now(timezone.utc) + timedelta(hours=1)
+        future = datetime.now(UTC) + timedelta(hours=1)
         replayed = graph.replay_until(future)
-        
+
         replayed_node = next((n for n in replayed if n.node_id == "replay-node-2"), None)
         assert replayed_node is not None
         assert replayed_node.title == "Updated"
@@ -278,7 +270,7 @@ class TestTraceStore:
             status="completed",
             duration_ms=15,
             attributes={"url": "https://web.whatsapp.com"},
-            started_at=datetime.now(timezone.utc),
+            started_at=datetime.now(UTC),
         )
         span2 = TraceSpan(
             trace_id=trace_id,
@@ -289,12 +281,12 @@ class TestTraceStore:
             status="completed",
             duration_ms=5,
             attributes={},
-            started_at=datetime.now(timezone.utc),
+            started_at=datetime.now(UTC),
         )
-        
+
         trace_store.record_span(span1)
         trace_store.record_span(span2)
-        
+
         spans = trace_store.get_trace(trace_id)
         assert len(spans) == 2
         assert spans[0].component == "chrome_extension"
@@ -314,10 +306,10 @@ class TestTraceStore:
                 status="completed",
                 duration_ms=10 * (i + 1),
                 attributes={},
-                started_at=datetime.now(timezone.utc),
+                started_at=datetime.now(UTC),
             )
             trace_store.record_span(span)
-        
+
         recent = trace_store.get_recent_traces(limit=10)
         assert len(recent) == 3
         for trace in recent:
@@ -338,10 +330,10 @@ class TestTraceStore:
             status="completed",
             duration_ms=10,
             attributes={},
-            started_at=datetime.now(timezone.utc) - timedelta(days=10),
+            started_at=datetime.now(UTC) - timedelta(days=10),
         )
         trace_store.record_span(old_span)
-        
+
         # Create a recent trace
         recent_span = TraceSpan(
             trace_id="recent-trace-id",
@@ -352,14 +344,14 @@ class TestTraceStore:
             status="completed",
             duration_ms=10,
             attributes={},
-            started_at=datetime.now(timezone.utc),
+            started_at=datetime.now(UTC),
         )
         trace_store.record_span(recent_span)
-        
+
         # Prune with 7-day retention
         deleted = trace_store.prune_old_spans()
         assert deleted >= 1
-        
+
         # Old trace should be gone, recent should remain
         old_spans = trace_store.get_trace("old-trace-id")
         recent_spans = trace_store.get_trace("recent-trace-id")
@@ -387,10 +379,10 @@ class TestW3CTraceContext:
         trace_id = "0123456789abcdef0123456789abcdef"
         span_id = "0123456789abcdef"
         flags = "01"
-        
+
         header = format_traceparent(trace_id, span_id, flags)
         assert header == "00-0123456789abcdef0123456789abcdef-0123456789abcdef-01"
-        
+
         parsed = parse_traceparent(header)
         assert parsed is not None
         assert parsed["trace_id"] == trace_id
@@ -416,11 +408,11 @@ class TestTracerContextManager:
     def test_span_context_manager_records_on_exit(self, trace_store):
         """Test that span is recorded on context manager exit."""
         tracer = Tracer("test_component", trace_store)
-        
+
         with tracer.span("test_operation") as span:
             span.set_attribute("key", "value")
             time.sleep(0.01)  # Ensure some duration
-        
+
         spans = trace_store.get_trace(span.trace_id)
         assert len(spans) == 1
         assert spans[0].component == "test_component"
@@ -433,14 +425,14 @@ class TestTracerContextManager:
         """Test that span records error status on exception."""
         tracer = Tracer("test_component", trace_store)
         trace_id_captured = None
-        
+
         try:
             with tracer.span("failing_operation") as span:
                 trace_id_captured = span.trace_id
                 raise ValueError("Test error")
         except ValueError:
             pass
-        
+
         # Get the trace by the captured trace_id
         spans = trace_store.get_trace(trace_id_captured)
         assert len(spans) == 1
@@ -454,11 +446,11 @@ class TestEndToEndTracePropagation:
     async def test_trace_id_propagation_browser_to_context_graph(self):
         """Test trace_id from simulated browser message propagates to ContextGraph events."""
         graph = ContextKnowledgeGraph()
-        
+
         # Simulate browser message with trace_id
         trace_id = generate_trace_id()
-        span_id = generate_span_id()
-        
+        generate_span_id()
+
         # This mimics what happens in browser_bridge_endpoint
         event = graph.upsert_node(
             ContextNode(
@@ -473,11 +465,11 @@ class TestEndToEndTracePropagation:
             agent_id="chrome_extension",
             trace_id=trace_id,
         )
-        
+
         # Verify event has trace_id
         assert event is not None
         assert event.trace_id == trace_id
-        
+
         # Verify event is in history
         history = graph.get_node_history("trace-prop-test")
         assert len(history) >= 1
@@ -498,7 +490,7 @@ class TestEndToEndTracePropagation:
             trace_id="trace-abc",
             span_id="span-xyz",
         )
-        
+
         assert envelope.trace_id == "trace-abc"
         assert envelope.span_id == "span-xyz"
 
@@ -509,9 +501,9 @@ class TestEndToEndTracePropagation:
         import tempfile
         with tempfile.NamedTemporaryFile(suffix='.db', delete=False) as f:
             db_path = f.name
-        
+
         trace_store = init_trace_store(db_path, retention_days=7)
-        
+
         try:
             # Create a multi-component trace
             trace_id = generate_trace_id()
@@ -522,9 +514,9 @@ class TestEndToEndTracePropagation:
                 ("policy_enclave", "evaluate_risk", "hybrid_router"),
                 ("tool_dispatcher", "dispatch", "policy_enclave"),
             ]
-            
+
             prev_span_id = None
-            for i, (comp, op, parent_comp) in enumerate(components):
+            for i, (comp, op, _parent_comp) in enumerate(components):
                 span = TraceSpan(
                     trace_id=trace_id,
                     span_id=generate_span_id(),
@@ -534,19 +526,19 @@ class TestEndToEndTracePropagation:
                     status="completed",
                     duration_ms=10 + i * 5,
                     attributes={"test": True},
-                    started_at=datetime.now(timezone.utc),
+                    started_at=datetime.now(UTC),
                 )
                 trace_store.record_span(span)
                 prev_span_id = span.span_id
-            
+
             # Verify waterfall structure
             spans = trace_store.get_trace(trace_id)
             assert len(spans) == 5
-            
+
             # Verify parent-child chain
             for i in range(1, len(spans)):
                 assert spans[i].parent_span_id == spans[i - 1].span_id
-            
+
             # Verify components in order
             expected_components = [c[0] for c in components]
             actual_components = [s.component for s in spans]
@@ -568,7 +560,7 @@ class TestContextGraphHistoryEndpoints:
     async def test_get_node_history_endpoint(self):
         """Test GET /api/context/nodes/{node_id}/history endpoint."""
         graph = ContextKnowledgeGraph()
-        
+
         node = ContextNode(
             node_id="endpoint-history-test",
             node_type=ContextNodeType.FACT,
@@ -580,7 +572,7 @@ class TestContextGraphHistoryEndpoints:
         )
         graph.upsert_node(node, agent_id="test_agent")
         graph.upsert_node(node, agent_id="test_agent")  # Update
-        
+
         # Test via direct function call (endpoint logic is in main.py)
         history = graph.get_node_history("endpoint-history-test")
         assert len(history) == 2
@@ -591,7 +583,7 @@ class TestContextGraphHistoryEndpoints:
     async def test_replay_context_graph_endpoint(self):
         """Test GET /api/context/replay?as_of=<timestamp> endpoint."""
         graph = ContextKnowledgeGraph()
-        
+
         node = ContextNode(
             node_id="replay-endpoint-test",
             node_type=ContextNodeType.FACT,
@@ -602,15 +594,15 @@ class TestContextGraphHistoryEndpoints:
             tags=["test"],
         )
         graph.upsert_node(node, agent_id="test_agent")
-        
-        before_update = datetime.now(timezone.utc)
+
+        before_update = datetime.now(UTC)
         time.sleep(0.01)
-        
+
         node.title = "Updated"
         node.content = {"version": 2}
-        node.updated_at = datetime.now(timezone.utc)
+        node.updated_at = datetime.now(UTC)
         graph.upsert_node(node, agent_id="test_agent")
-        
+
         # Replay to before update
         replayed = graph.replay_until(before_update)
         replayed_node = next((n for n in replayed if n.node_id == "replay-endpoint-test"), None)
@@ -628,9 +620,9 @@ class TestTraceEndpoints:
         import tempfile
         with tempfile.NamedTemporaryFile(suffix='.db', delete=False) as f:
             db_path = f.name
-        
+
         trace_store = init_trace_store(db_path, retention_days=7)
-        
+
         try:
             trace_id = generate_trace_id()
             span = TraceSpan(
@@ -642,10 +634,10 @@ class TestTraceEndpoints:
                 status="completed",
                 duration_ms=42,
                 attributes={"key": "value"},
-                started_at=datetime.now(timezone.utc),
+                started_at=datetime.now(UTC),
             )
             trace_store.record_span(span)
-            
+
             spans = trace_store.get_trace(trace_id)
             assert len(spans) == 1
             assert spans[0].trace_id == trace_id
@@ -663,9 +655,9 @@ class TestTraceEndpoints:
         import tempfile
         with tempfile.NamedTemporaryFile(suffix='.db', delete=False) as f:
             db_path = f.name
-        
+
         trace_store = init_trace_store(db_path, retention_days=7)
-        
+
         try:
             for i in range(3):
                 trace_id = generate_trace_id()
@@ -678,10 +670,10 @@ class TestTraceEndpoints:
                     status="completed",
                     duration_ms=10,
                     attributes={},
-                    started_at=datetime.now(timezone.utc),
+                    started_at=datetime.now(UTC),
                 )
                 trace_store.record_span(span)
-            
+
             recent = trace_store.get_recent_traces(limit=10)
             assert len(recent) == 3
             for trace in recent:

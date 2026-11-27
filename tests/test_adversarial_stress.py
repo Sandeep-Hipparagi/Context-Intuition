@@ -8,17 +8,13 @@ path traversal guards, SQLite WAL concurrency, WebSocket flooding, and media fau
 
 import asyncio
 import json
-import os
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any
 from uuid import uuid4
 
 import httpx
-from httpx import ASGITransport
 import pytest
-from starlette.testclient import TestClient
-
 from app.config import get_or_create_bridge_token, get_vibecore_home
 from app.dispatcher import ToolDispatcher
 from app.ledger.context_graph import ContextKnowledgeGraph
@@ -31,12 +27,12 @@ from app.schemas import (
     BridgeMessageType,
     ContextNode,
     ContextNodeType,
-    DiffPreview,
     TierLevel,
 )
-from enclave import get_policy_enclave, IdempotencyConflictError
+from enclave import get_policy_enclave
 from ffmpeg_tool import FFmpegClippingTool
-
+from httpx import ASGITransport
+from starlette.testclient import TestClient
 
 # ============================================================================
 # Vector 1 — Delimiter Breakout & Prompt Injection Escape
@@ -89,7 +85,7 @@ def test_vector1_websocket_telemetry_prompt_injection_containment():
                 "chat_name": "Hostile Sender",
                 "text": injection_text,
             },
-            timestamp=datetime.now(timezone.utc),
+            timestamp=datetime.now(UTC),
         )
         ws.send_text(frame.model_dump_json())
 
@@ -120,7 +116,7 @@ async def test_vector2_toctou_concurrent_double_approval_race():
     # Track execution count
     execution_counter = {"count": 0}
 
-    async def mock_handler(payload: Dict[str, Any]) -> Dict[str, Any]:
+    async def mock_handler(payload: dict[str, Any]) -> dict[str, Any]:
         execution_counter["count"] += 1
         # Brief sleep to widen race window
         await asyncio.sleep(0.02)
@@ -233,8 +229,8 @@ async def test_vector3_path_traversal_file_delete_rejected():
     enclave.queue.claim_for_execution(env.action_id)
 
     # Mint capability token for the original payload
-    from capabilities import mint_capability_token
     from app.config import settings
+    from capabilities import mint_capability_token
 
     traversal_paths = [
         "../../../etc/passwd",
@@ -284,7 +280,7 @@ async def test_vector4_high_throughput_context_graph_and_rules_stress():
                 node_id=node_id,
                 node_type=ContextNodeType.FACT,
                 title=f"Stress Fact {i}",
-                content={"metric": i, "timestamp": datetime.now(timezone.utc).isoformat()},
+                content={"metric": i, "timestamp": datetime.now(UTC).isoformat()},
                 source="stress_worker",
                 tags=["stress_test", f"batch_{i % 5}"],
             )
@@ -305,7 +301,7 @@ async def test_vector4_high_throughput_context_graph_and_rules_stress():
                 risk_factors=["Outbound communication"],
                 payload={"text": f"Dear Customer {i}, this is an automated greeting."},
                 status=ApprovalStatus.PENDING,
-                created_at=datetime.now(timezone.utc),
+                created_at=datetime.now(UTC),
             )
             revised = {"text": f"Hey! Just checking in on #{i}. Talk soon."}
             await edit_delta.learn_from_edit(dummy_env, revised)
@@ -355,7 +351,7 @@ def test_vector5_websocket_flood_and_oversized_frame():
                     message_id=str(uuid4()),
                     msg_type=BridgeMessageType.HEARTBEAT,
                     payload={"ping": i},
-                    timestamp=datetime.now(timezone.utc),
+                    timestamp=datetime.now(UTC),
                 )
                 bridge_ws.send_text(msg.model_dump_json())
 

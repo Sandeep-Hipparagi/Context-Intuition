@@ -4,20 +4,20 @@ Author: Sandeep Hipparagi (https://github.com/Sandeep-Hipparagi)
 """
 
 import json
+from datetime import UTC, datetime
+
 import pytest
-from datetime import datetime, timezone
+from app.config import get_or_create_bridge_token, settings
+from app.main import app, context_graph, policy_enclave, tool_dispatcher
+from app.schemas import BridgeMessage, BridgeMessageType, ContextNodeType
 from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
-
-from app.main import app, context_graph, tool_dispatcher, policy_enclave
-from app.config import get_or_create_bridge_token, settings
-from app.schemas import BridgeMessage, BridgeMessageType, ContextNodeType
 
 
 def test_ws_browser_bridge_unauthorized():
     client = TestClient(app)
     with pytest.raises(WebSocketDisconnect) as excinfo:
-        with client.websocket_connect("/ws/browser-bridge?token=invalid_token") as ws:
+        with client.websocket_connect("/ws/browser-bridge?token=invalid_token"):
             pass
     assert excinfo.value.code == 1008
 
@@ -36,7 +36,7 @@ def test_ws_browser_bridge_telemetry_and_quarantine():
             "in_stock": True,
             "url": "https://www.instacart.com/products/123",
             "can_stage_cart": True,
-            "extracted_at": datetime.now(timezone.utc).isoformat(),
+            "extracted_at": datetime.now(UTC).isoformat(),
         }
         msg_grocery = BridgeMessage(
             msg_type=BridgeMessageType.DOM_GROCERY_SNAPSHOT,
@@ -50,7 +50,7 @@ def test_ws_browser_bridge_telemetry_and_quarantine():
             "chat_name": "Research Group",
             "sender": "Alex",
             "text": "Please confirm the server IP when you can.",
-            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "timestamp": datetime.now(UTC).isoformat(),
         }
         msg_wa = BridgeMessage(
             msg_type=BridgeMessageType.WHATSAPP_INCOMING_MESSAGE,
@@ -65,7 +65,7 @@ def test_ws_browser_bridge_telemetry_and_quarantine():
                     "post_url": "https://instagram.com/p/DB12345",
                     "author": "ai_researcher",
                     "caption": "New paper on temporal graph pruning for autonomous agents.",
-                    "extracted_at": datetime.now(timezone.utc).isoformat(),
+                    "extracted_at": datetime.now(UTC).isoformat(),
                 }
             ]
         }

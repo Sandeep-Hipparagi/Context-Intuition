@@ -3,7 +3,7 @@
  * Author: Sandeep Hipparagi (https://github.com/Sandeep-Hipparagi)
  */
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import {
   ActionEnvelope,
   ApprovalStatus,
@@ -106,7 +106,7 @@ export const App: React.FC = () => {
     loadLedgerData();
   };
 
-  const loadLedgerData = async () => {
+  const loadLedgerData = useCallback(async () => {
     try {
       const [nodes, rules] = await Promise.all([
         fetchContextNodes().catch(() => []),
@@ -117,7 +117,7 @@ export const App: React.FC = () => {
     } catch (e) {
       console.error('Error loading context ledger:', e);
     }
-  };
+  }, []);
 
   const handleResolveAction = async (
     actionId: string,

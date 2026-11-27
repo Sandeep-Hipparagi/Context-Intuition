@@ -10,29 +10,29 @@ Enforces cryptographic capability token verification for all executions.
 
 from __future__ import annotations
 
-import asyncio
 import logging
-import os
-from datetime import datetime, timezone
+import sys
+from collections.abc import Callable, Coroutine
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Callable, Coroutine, Dict, Optional
+from typing import Any
 from uuid import uuid4
 
-import sys
 ROOT_DIR = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(ROOT_DIR))
 sys.path.insert(0, str(ROOT_DIR / "core-orchestrator"))
 sys.path.insert(0, str(ROOT_DIR / "policy-enclave"))
 sys.path.insert(0, str(ROOT_DIR / "mcp-tools"))
 
-from app.schemas import BridgeMessage, BridgeMessageType
-from app.config import settings
-from gmail_tool import GmailTool
 from calendar_tool import CalendarTool
+from gmail_tool import GmailTool
+
+from app.config import settings
+from app.schemas import BridgeMessage, BridgeMessageType
 
 logger = logging.getLogger("ToolDispatcher")
 
-AsyncHandler = Callable[[Dict[str, Any]], Coroutine[Any, Any, Dict[str, Any]]]
+AsyncHandler = Callable[[dict[str, Any]], Coroutine[Any, Any, dict[str, Any]]]
 
 
 class BridgeDisconnectedError(Exception):
@@ -41,14 +41,12 @@ class BridgeDisconnectedError(Exception):
     authenticated Chrome extension bridge connection exists.
     This is a recoverable exception: the action remains PENDING in the approval queue.
     """
-    pass
 
 
 class CapabilityVerificationError(Exception):
     """
     Raised when a capability token is missing, invalid, expired, or already consumed.
     """
-    pass
 
 
 class ToolDispatcher:
@@ -58,9 +56,9 @@ class ToolDispatcher:
     """
 
     def __init__(self):
-        self._handlers: Dict[str, AsyncHandler] = {}
-        self._browser_sender: Optional[Callable[[BridgeMessage], Coroutine[Any, Any, None]]] = None
-        self._is_browser_connected: Optional[Callable[[], bool]] = None
+        self._handlers: dict[str, AsyncHandler] = {}
+        self._browser_sender: Callable[[BridgeMessage], Coroutine[Any, Any, None]] | None = None
+        self._is_browser_connected: Callable[[], bool] | None = None
         self._register_default_handlers()
 
     def set_browser_bridge(
@@ -96,8 +94,8 @@ class ToolDispatcher:
     def _verify_capability_token(
         self,
         tool_name: str,
-        payload: Dict[str, Any],
-        capability_token: Optional[str],
+        payload: dict[str, Any],
+        capability_token: str | None,
         profile: str,
     ) -> None:
         """
@@ -111,25 +109,26 @@ class ToolDispatcher:
             )
 
         # Import here to avoid circular imports
-        from capabilities import verify_capability_token, CapabilityVerificationError as CapError
+        from capabilities import CapabilityVerificationError as CapError
+        from capabilities import verify_capability_token
 
         try:
             verify_capability_token(capability_token, tool_name, payload, profile)
         except CapError as e:
-            raise CapabilityVerificationError(f"Capability verification failed for '{tool_name}': {e}")
+            raise CapabilityVerificationError(f"Capability verification failed for '{tool_name}': {e}") from e
 
     async def dispatch(
         self,
         tool_name: str,
-        payload: Dict[str, Any],
-        envelope_id: Optional[str] = None,
-        capability_token: Optional[str] = None,
-    ) -> Dict[str, Any]:
+        payload: dict[str, Any],
+        envelope_id: str | None = None,
+        capability_token: str | None = None,
+    ) -> dict[str, Any]:
         """
         Executes the registered handler for the given tool_name with the finalized payload.
         Enforces zero-trust: all executions require a verified capability token.
         """
-        from enclave import get_policy_enclave, ApprovalStatus, TierLevel
+        from enclave import ApprovalStatus, TierLevel, get_policy_enclave
 
         enclave = get_policy_enclave()
         tier = enclave._policy_loader.get_tool_tier(tool_name)
@@ -169,7 +168,7 @@ class ToolDispatcher:
     # Default Tool Handlers
     # ========================================================================
 
-    async def _handle_gmail_send(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+    async def _handle_gmail_send(self, payload: dict[str, Any]) -> dict[str, Any]:
         to = payload.get("to") or payload.get("recipient")
         subject = payload.get("subject", "No Subject")
         body = payload.get("body", "")
@@ -187,10 +186,10 @@ class ToolDispatcher:
             _user_signature="sig_dispatcher_authorized",
         )
 
-    async def _handle_calendar_create(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+    async def _handle_calendar_create(self, payload: dict[str, Any]) -> dict[str, Any]:
         title = payload.get("title", "New Event")
-        start_time = payload.get("start_time") or datetime.now(timezone.utc).isoformat()
-        end_time = payload.get("end_time") or datetime.now(timezone.utc).isoformat()
+        start_time = payload.get("start_time") or datetime.now(UTC).isoformat()
+        end_time = payload.get("end_time") or datetime.now(UTC).isoformat()
         attendees = payload.get("attendees", [])
 
         return await CalendarTool.create_event(
@@ -201,7 +200,7 @@ class ToolDispatcher:
             _user_signature="sig_dispatcher_authorized",
         )
 
-    async def _handle_whatsapp_send(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+    async def _handle_whatsapp_send(self, payload: dict[str, Any]) -> dict[str, Any]:
         """
         Routes WhatsApp send execution over the active WebSocket bridge to Chrome.
         """
@@ -223,17 +222,17 @@ class ToolDispatcher:
                 "recipient": payload.get("chat_name") or payload.get("to") or payload.get("recipient"),
                 "text": payload.get("text") or payload.get("body") or payload.get("message"),
             },
-            timestamp=datetime.now(timezone.utc),
+            timestamp=datetime.now(UTC),
         )
 
         await self._browser_sender(frame)
         return {
             "status": "DISPATCHED_TO_BROWSER",
             "frame_id": frame.message_id,
-            "dispatched_at": datetime.now(timezone.utc).isoformat(),
+            "dispatched_at": datetime.now(UTC).isoformat(),
         }
 
-    async def _handle_file_delete(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+    async def _handle_file_delete(self, payload: dict[str, Any]) -> dict[str, Any]:
         path_str = payload.get("file_path") or payload.get("path")
         if not path_str:
             raise ValueError("Missing file_path in delete payload")

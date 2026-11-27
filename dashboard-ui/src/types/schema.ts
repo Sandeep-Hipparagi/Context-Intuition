@@ -5,7 +5,7 @@
 
 export type TierLevel = 'TIER_0_OBSERVE' | 'TIER_1_STAGE' | 'TIER_2_COMMIT';
 
-export type ApprovalStatus = 'PENDING' | 'APPROVED' | 'REJECTED' | 'EDITED' | 'EXPIRED';
+export type ApprovalStatus = 'PENDING' | 'EXECUTING' | 'APPROVED' | 'REJECTED' | 'EDITED' | 'FAILED' | 'EXPIRED';
 
 export type ContextNodeType = 
   | 'FACT'

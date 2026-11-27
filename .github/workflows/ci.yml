@@ -26,20 +26,20 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Set up Python ${{ matrix.python-version }}
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: ${{ matrix.python-version }}
 
       - name: Cache pip dependencies
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/.cache/pip
-          key: ${{ runner.os }}-pip-${{ hashFiles('pyproject.toml') }}
+          key: ${{ runner.os }}-py${{ matrix.python-version }}-pip-${{ hashFiles('pyproject.toml') }}
           restore-keys: |
-            ${{ runner.os }}-pip-
+            ${{ runner.os }}-py${{ matrix.python-version }}-pip-
 
       - name: Install dependencies
         run: |
@@ -48,11 +48,11 @@ jobs:
 
       - name: Run type checking
         run: |
-          mypy core-orchestrator/app --ignore-missing-imports || true
+          mypy core-orchestrator/app policy-enclave mcp-tools
 
       - name: Run linting
         run: |
-          ruff check core-orchestrator/app || true
+          ruff check core-orchestrator/app policy-enclave mcp-tools tests
 
       - name: Run pytest
         run: |
@@ -68,10 +68,10 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Set up Node.js ${{ matrix.node-version }}
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: ${{ matrix.node-version }}
           cache: 'npm'
@@ -109,10 +109,10 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Set up Node.js ${{ matrix.node-version }}
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: ${{ matrix.node-version }}
           cache: 'npm'
@@ -137,128 +137,153 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: "3.11"
 
-      - name: Install security tools
+      - name: Install dependencies and security tools
         run: |
-          pip install bandit safety
+          python -m pip install --upgrade pip
+          pip install -e . bandit pip-audit
 
       - name: Run bandit security linter
         run: |
-          bandit -r core-orchestrator/app -f json -o bandit-report.json || true
-          cat bandit-report.json
+          bandit -r core-orchestrator/app policy-enclave mcp-tools -f screen
 
-      - name: Run safety check
+      - name: Run pip-audit vulnerability scan
         run: |
-          safety check --json --output safety-report.json || true
-          cat safety-report.json
+          pip-audit --desc
 
   hardcoded-secrets-scan:
     name: Hardcoded Secrets Scan
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Scan for hardcoded secrets
         run: |
-          # Check for common secret patterns in source files (excluding tests, CI, and config)
-          set +e
-          FOUND_SECRETS=0
-          
-          # Scan for patterns but exclude test files, CI workflows, and config files
-          # Use grep -F for fixed string matching (faster, no regex special chars)
-          for pattern in "sk_live_" "sk_test_" "ghp_" "api_key=" "password="; do
-            # Use grep -F for fixed string matching, -r for recursive
-            if grep -rF "$pattern" --include="*.py" --include="*.ts" --include="*.json" --include="*.yaml" --include="*.yml" . \
-              --exclude-dir=node_modules \
-              --exclude-dir=dist \
-              --exclude-dir=.git \
-              --exclude-dir=__pycache__ \
-              --exclude-dir=.pytest_temp \
-              --exclude-dir=context_intuition.egg-info \
-              --exclude="*.md" \
-              --exclude="*.github/*" \
-              | grep -v "os.environ" \
-              | grep -v "settings\." \
-              | grep -v "VIBECORE_" \
-              | grep -v "LOCAL_LLM_URL" \
-              | grep -v "CONFIDENCE_THRESHOLD" \
-              | grep -v "ORCHESTRATOR_" \
-              | grep -v "test_" \
-              | grep -v "cloud_api_key.*=.*test" \
-              | grep -v "cloud_api_key=\"test-key\"" \
-              | grep -v "pytest" \
-              | grep -v "VIBECORE_MOCK_LLM" \
-              | grep -v "VIBECORE_OLLAMA_URL" \
-              | grep -v "VIBECORE_LOCAL_OPENAI_URL" \
-              | grep -v "VIBECORE_CLOUD_API_URL" \
-              | grep -v "VIBECORE_CLOUD_API_KEY" \
-              | grep -v "VIBECORE_FAST_MODEL" \
-              | grep -v "VIBECORE_REASONING_MODEL" \
-              | grep -v "VIBECORE_MOCK_LLM" \
-              | grep -v "self.api_key=" \
-              | grep -v "self.api_key =" \
-              | grep -Ev "sk_live_|sk_test_|ghp_" 2>/dev/null; then
-              FOUND_SECRETS=1
-            fi
-          done
-          
-          if [ $FOUND_SECRETS -eq 1 ]; then
-            echo "::error::Found potential hardcoded secrets"
-            exit 1
-          fi
-          echo "No hardcoded secrets detected"
+          python3 - <<'EOF'
+          import re
+          import sys
+          from pathlib import Path
+
+          exclude_dirs = {
+              ".git",
+              ".github",
+              ".mypy_cache",
+              ".pytest_temp",
+              ".ruff_cache",
+              ".venv",
+              "__pycache__",
+              "context_intuition.egg-info",
+              "dist",
+              "node_modules",
+              "tests",
+              "venv",
+          }
+          scan_exts = {".py", ".ts", ".tsx", ".js", ".mjs", ".json", ".yaml", ".yml", ".sh", ".ps1"}
+          token_re = re.compile(
+              r"(?:sk_live_[A-Za-z0-9_]+|sk_test_[A-Za-z0-9_]+|ghp_[A-Za-z0-9]+"
+              r"|github_pat_[A-Za-z0-9_]+|AKIA[0-9A-Z]{16}"
+              r"|-----BEGIN (?:[A-Z]+ )?PRIVATE KEY-----)"
+          )
+          cred_re = re.compile(
+              r"""(?:api_key|api_secret|secret_key|password|access_token|client_secret|bearer_token)\s*[:=]\s*["']([^"']{4,})["']""",
+              re.IGNORECASE,
+          )
+          placeholder_re = re.compile(
+              r"^(?:placeholder|changeme|your[_-][A-Za-z0-9_-]+|<[^>]+>|\.\.\.|\*+)$",
+              re.IGNORECASE,
+          )
+
+          hits = []
+          for path in Path(".").rglob("*"):
+              if not path.is_file():
+                  continue
+              if any(part in exclude_dirs for part in path.parts):
+                  continue
+              if path.name.startswith("test_") or path.name == "package-lock.json":
+                  continue
+              if path.suffix not in scan_exts and not path.name.startswith(".env"):
+                  continue
+              text = path.read_text(encoding="utf-8", errors="ignore")
+              for lineno, line in enumerate(text.splitlines(), start=1):
+                  if token_re.search(line):
+                      hits.append(f"::error file={path},line={lineno}::Potential hardcoded token detected")
+                  else:
+                      m = cred_re.search(line)
+                      if m and not placeholder_re.search(m.group(1)):
+                          hits.append(f"::error file={path},line={lineno}::Potential hardcoded credential literal detected")
+
+          if hits:
+              print("\n".join(hits))
+              sys.exit(1)
+          print("No hardcoded secrets detected")
+          EOF
 
   hardcoded-paths-scan:
     name: Hardcoded Paths Scan
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Scan for hardcoded absolute paths
         run: |
-          set +e
-          FOUND_PATHS=0
-          
-          # Check for hardcoded paths in source files (excluding tests, CI, docs)
-          for pattern in "/home/" "/Users/" "C:\\"; do
-            if grep -rF "$pattern" --include="*.py" --include="*.ts" \
-              core-orchestrator/ chrome-extension/src/ dashboard-ui/src/ \
-              --exclude-dir=node_modules \
-              --exclude-dir=dist \
-              --exclude-dir=.git \
-              --exclude-dir=__pycache__ \
-              --exclude-dir=.pytest_temp \
-              --exclude-dir=context_intuition.egg-info \
-              | grep -v "test" \
-              | grep -v "\.md" \
-              | grep -v "os.path.expanduser" \
-              | grep -v "Path.home" \
-              | grep -v "expanduser" \
-              | grep -v "os.environ" \
-              | grep -v "environ\[" \
-              | grep -v "VIBECORE_HOME" \
-              | grep -v "#.*home" \
-              | grep -v "#.*Users" \
-              | grep -v "//.*home" \
-              | grep -v "//.*Users" \
-              2>/dev/null; then
-              FOUND_PATHS=1
-            fi
-          done
-          
-          if [ $FOUND_PATHS -eq 1 ]; then
-            echo "::error::Found hardcoded absolute paths"
-            exit 1
-          fi
-          echo "No hardcoded absolute paths detected"
+          python3 - <<'EOF'
+          import re
+          import sys
+          from pathlib import Path
+
+          scan_roots = [
+              Path("core-orchestrator"),
+              Path("policy-enclave"),
+              Path("mcp-tools"),
+              Path("chrome-extension/src"),
+              Path("dashboard-ui/src"),
+              Path("scripts"),
+          ]
+          exclude_dirs = {
+              ".git",
+              ".mypy_cache",
+              ".pytest_temp",
+              ".ruff_cache",
+              ".venv",
+              "__pycache__",
+              "context_intuition.egg-info",
+              "dist",
+              "node_modules",
+              "tests",
+              "venv",
+          }
+          scan_exts = {".py", ".ts", ".tsx", ".js", ".sh", ".ps1"}
+          path_re = re.compile(
+              r"(?:/home/[A-Za-z0-9._-]+|/Users/[A-Za-z0-9._-]+|[A-Za-z]:(?:\\+|/)(?:Users|home|Program Files|[A-Za-z0-9._-]{2,})(?:\\|/))"
+          )
+
+          hits = []
+          for root in scan_roots:
+              if not root.exists():
+                  continue
+              for path in root.rglob("*"):
+                  if not path.is_file() or path.suffix not in scan_exts:
+                      continue
+                  if any(part in exclude_dirs for part in path.parts) or path.name.startswith("test_"):
+                      continue
+                  text = path.read_text(encoding="utf-8", errors="ignore")
+                  for lineno, line in enumerate(text.splitlines(), start=1):
+                      if path_re.search(line):
+                          hits.append(f"::error file={path},line={lineno}::Hardcoded absolute path detected")
+
+          if hits:
+              print("\n".join(hits))
+              sys.exit(1)
+          print("No hardcoded absolute paths detected")
+          EOF
 
   full-verification:
     name: Full Verification Gate

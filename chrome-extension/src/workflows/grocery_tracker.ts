@@ -53,27 +53,40 @@ export class GroceryTrackerWorkflow {
       'button[data-testid="add-to-cart"]',
       'button[aria-label*="Add to cart" i]',
       'button[aria-label*="Add to basket" i]',
-      'button:has-text("Add to Cart")',
     ];
 
+    let button: HTMLButtonElement | null = null;
     for (const selector of addToCartSelectors) {
-      const button = document.querySelector(selector) as HTMLButtonElement | null;
-      if (button && !button.disabled) {
-        // Security check: ensure button is NOT a checkout or immediate purchase trigger
-        const btnText = (button.innerText || button.getAttribute('aria-label') || '').toLowerCase();
-        if (btnText.includes('buy now') || btnText.includes('checkout') || btnText.includes('purchase')) {
-          return {
-            success: false,
-            message: 'Blocked by Policy Enclave: Button resembles immediate checkout (TIER_2_COMMIT required).'
-          };
-        }
+      const candidate = document.querySelector(selector) as HTMLButtonElement | null;
+      if (candidate && !candidate.disabled) {
+        button = candidate;
+        break;
+      }
+    }
 
-        button.click();
+    if (!button) {
+      const buttons = Array.from(document.querySelectorAll('button')) as HTMLButtonElement[];
+      button =
+        buttons.find(
+          (b) => !b.disabled && (b.innerText || b.textContent || '').trim().toLowerCase().includes('add to cart')
+        ) || null;
+    }
+
+    if (button && !button.disabled) {
+      // Security check: ensure button is NOT a checkout or immediate purchase trigger
+      const btnText = (button.innerText || button.getAttribute('aria-label') || '').toLowerCase();
+      if (btnText.includes('buy now') || btnText.includes('checkout') || btnText.includes('purchase')) {
         return {
-          success: true,
-          message: 'Item staged into cart (TIER_1_STAGE). Checkout remains locked.'
+          success: false,
+          message: 'Blocked by Policy Enclave: Button resembles immediate checkout (TIER_2_COMMIT required).'
         };
       }
+
+      button.click();
+      return {
+        success: true,
+        message: 'Item staged into cart (TIER_1_STAGE). Checkout remains locked.'
+      };
     }
 
     return {

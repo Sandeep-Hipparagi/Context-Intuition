@@ -7,12 +7,12 @@ requires-python = ">=3.11"
 authors = [
     { name = "Sandeep Hipparagi" }
 ]
-license = { text = "Apache-2.0" }
+license = "Apache-2.0"
+license-files = ["LICENSE"]
 keywords = ["agentic-ai", "multi-agent", "local-first", "zero-trust", "privacy", "guardrails"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
-    "License :: OSI Approved :: Apache Software License",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
@@ -30,6 +30,9 @@ dependencies = [
     "python-dotenv>=1.0.1",
     "croniter>=2.0.0",
     "apscheduler>=3.10.4",
+    "numpy>=1.26.0",
+    "pyyaml>=6.0",
+    "defusedxml>=0.7.1",
 ]
 
 [project.urls]
@@ -43,7 +46,7 @@ dev = [
     "pytest>=8.3.0",
     "pytest-asyncio>=0.24.0",
     "mypy>=1.11.0",
-    "ruff>=0.6.0"
+    "ruff>=0.12.0"
 ]
 
 [tool.pytest.ini_options]
@@ -51,5 +54,27 @@ asyncio_mode = "strict"
 addopts = "--basetemp=.pytest_temp -q"
 
 [build-system]
-requires = ["setuptools>=68.0"]
+requires = ["setuptools>=77.0"]
 build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["core-orchestrator"]
+include = ["app*"]
+
+[tool.mypy]
+mypy_path = ["core-orchestrator", "policy-enclave", "mcp-tools"]
+ignore_missing_imports = true
+explicit_package_bases = true
+exclude = ['(?:policy-enclave|mcp-tools)[\\/]__init__\.py$']
+
+[tool.ruff]
+target-version = "py311"
+line-length = 120
+extend-exclude = ["chrome-extension", "dashboard-ui", ".pytest_temp"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "S", "DTZ", "PIE", "PERF", "FURB", "RUF"]
+ignore = ["E402", "E501", "UP042"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S101", "S105", "S106", "S108", "S110"]

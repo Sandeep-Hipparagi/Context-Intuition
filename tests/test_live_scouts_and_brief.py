@@ -4,18 +4,15 @@ Google Workspace offline fallback, FFmpeg clipping, and Morning Brief API.
 Author: Sandeep Hipparagi (https://github.com/Sandeep-Hipparagi)
 """
 
-import os
-import pytest
-import httpx
 from pathlib import Path
-from datetime import datetime, timezone
 
-from app.main import app, context_graph
-from app.schemas import ContextNode, ContextNodeType, MorningBrief
-from search_scout import SearchScoutTool
+import httpx
+import pytest
+from app.main import app
+from app.schemas import ContextNode, ContextNodeType
+from ffmpeg_tool import FFmpegClippingTool
 from google_workspace import GoogleWorkspaceConnector
-from ffmpeg_tool import FFmpegClippingTool, get_staged_clips_dir
-
+from search_scout import SearchScoutTool
 
 SAMPLE_ARXIV_XML = """<?xml version="1.0" encoding="utf-8"?>
 <feed xmlns="http://www.w3.org/2005/Atom">

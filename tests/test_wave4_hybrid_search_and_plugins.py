@@ -3,27 +3,20 @@ Wave 4 Tests: Hybrid Semantic Vector Search & Declarative Browser Workflow Plugi
 Author: Sandeep Hipparagi (https://github.com/Sandeep-Hipparagi)
 """
 
-import pytest
 import json
-import struct
-import httpx
 import os
-from datetime import datetime, timezone
-from unittest.mock import AsyncMock, MagicMock, patch
+from datetime import UTC, datetime
 from pathlib import Path
 
+import httpx
+import pytest
 from app.ledger.context_graph import ContextKnowledgeGraph
-from app.ledger.vector_index import LocalEmbeddingEngine, get_embedding_engine
+from app.ledger.vector_index import LocalEmbeddingEngine
+from app.main import app
 from app.schemas import (
     ContextNode,
     ContextNodeType,
-    ContextEvent,
-    ContextEventType,
-    ActionEnvelope,
-    ApprovalStatus,
-    TierLevel,
 )
-from app.main import app, context_graph
 
 
 class TestLocalEmbeddingEngine:
@@ -36,10 +29,10 @@ class TestLocalEmbeddingEngine:
     def test_offline_embed_deterministic(self, engine):
         """Test that offline embeddings are deterministic for same input."""
         text = "Test product: organic apples, price $2.99"
-        
+
         result1 = engine._offline_embed(text)
         result2 = engine._offline_embed(text)
-        
+
         assert result1.vector == result2.vector
         assert result1.source == "offline"
         assert result1.model == "offline-deterministic"
@@ -53,7 +46,7 @@ class TestLocalEmbeddingEngine:
         """Test that different texts produce different embeddings."""
         result1 = engine._offline_embed("apples")
         result2 = engine._offline_embed("oranges")
-        
+
         assert result1.vector != result2.vector
 
     def test_cosine_similarity_identical(self, engine):
@@ -62,7 +55,7 @@ class TestLocalEmbeddingEngine:
         # Normalize
         import numpy as np
         vec = (np.array(vec) / np.linalg.norm(vec)).tolist()
-        
+
         sim = engine.cosine_similarity(vec, vec)
         assert abs(sim - 1.0) < 1e-6
 
@@ -70,7 +63,7 @@ class TestLocalEmbeddingEngine:
         """Test cosine similarity of orthogonal vectors is 0.0."""
         vec1 = [1.0] + [0.0] * 255
         vec2 = [0.0, 1.0] + [0.0] * 254
-        
+
         sim = engine.cosine_similarity(vec1, vec2)
         assert abs(sim - 0.0) < 1e-6
 
@@ -86,7 +79,7 @@ class TestLocalEmbeddingEngine:
     async def test_embed_mock_mode(self, engine):
         """Test embed() returns offline result in mock mode."""
         result = await engine.embed("test text")
-        
+
         assert result.source == "offline"
         assert result.vector is not None
         assert len(result.vector) == 256
@@ -96,7 +89,7 @@ class TestLocalEmbeddingEngine:
         """Test batch embedding."""
         texts = ["text one", "text two", "text three"]
         results = await engine.embed_batch(texts)
-        
+
         assert len(results) == 3
         for r in results:
             assert r.source == "offline"
@@ -121,12 +114,12 @@ class TestContextGraphEmbeddings:
             source="test_agent",
             tags=["grocery", "test"],
         )
-        
+
         event = graph.upsert_node(node, agent_id="test_agent", trace_id="trace-123")
-        
+
         assert event is not None
         assert event.event_type == "NODE_CREATED"
-        
+
         # Verify embedding was stored
         retrieved = graph.get_node("embed-test-1")
         assert retrieved is not None
@@ -145,7 +138,7 @@ class TestContextGraphEmbeddings:
             tags=["test"],
         )
         graph.upsert_node(node, agent_id="test_agent")
-        
+
         # Direct SQL check
         import sqlite3
         conn = sqlite3.connect(graph.db_path)
@@ -154,7 +147,7 @@ class TestContextGraphEmbeddings:
         cursor.execute("SELECT * FROM node_embeddings WHERE node_id = ?", ("embed-table-test",))
         row = cursor.fetchone()
         conn.close()
-        
+
         assert row is not None
         assert row["node_id"] == "embed-table-test"
         assert row["model_name"] == "offline-deterministic"
@@ -173,16 +166,16 @@ class TestContextGraphEmbeddings:
             tags=["test"],
         )
         graph.upsert_node(node, agent_id="test_agent")
-        
+
         original = graph.get_node("embed-update-test")
         original_embedding = original.embedding
-        
+
         # Update node
         node.title = "Updated Title"
         node.content = {"data": "updated"}
-        node.updated_at = datetime.now(timezone.utc)
+        node.updated_at = datetime.now(UTC)
         graph.upsert_node(node, agent_id="test_agent")
-        
+
         updated = graph.get_node("embed-update-test")
         # Embedding should be regenerated
         assert updated.embedding is not None
@@ -212,19 +205,19 @@ class TestHybridSearch:
             )
             for i in range(5)
         ]
-        
+
         for node in nodes:
             graph.upsert_node(node, agent_id="test_agent")
-        
+
         # Search
         results = graph.search_hybrid("organic apples", limit=3)
-        
+
         assert len(results) <= 3
         assert len(results) > 0
         for node, score in results:
             assert 0.0 <= score <= 1.0
             assert node.node_id.startswith("search-test-")
-        
+
         # Results should be sorted by score descending
         scores = [s for _, s in results]
         assert scores == sorted(scores, reverse=True)
@@ -250,12 +243,12 @@ class TestHybridSearch:
             source="test",
             tags=["important"],
         ))
-        
+
         # Filter by node_type
         results = graph.search_hybrid("node", limit=10, node_type=ContextNodeType.FACT)
         assert len(results) == 1
         assert results[0][0].node_id == "filter-fact"
-        
+
         # Filter by tag
         results = graph.search_hybrid("node", limit=10, tag="important")
         assert len(results) == 2
@@ -283,14 +276,15 @@ class TestHybridSearch:
         )
         graph.upsert_node(node1)
         graph.upsert_node(node2)
-        
+
         # High semantic weight should rank "organic apples" higher for apple query
         results_high = graph.search_hybrid("organic apples", limit=2, semantic_weight=0.9)
         # Low semantic weight should rely more on temporal relevance
         results_low = graph.search_hybrid("organic apples", limit=2, semantic_weight=0.1)
-        
+
         # With high semantic weight, the apple node should be first
         assert results_high[0][0].node_id == "semantic-close"
+        assert len(results_low) == 2
         # With low semantic weight, temporal relevance might change order
         # (but both have same temporal relevance, so might still be apple first)
 
@@ -315,10 +309,10 @@ class TestSearchAPI:
                 source="test",
                 tags=["grocery"],
             ))
-            
+
             response = await client.get("/api/context/search?q=organic+apples&limit=5")
             assert response.status_code == 200
-            
+
             data = response.json()
             assert isinstance(data, list)
             assert len(data) > 0
@@ -356,7 +350,7 @@ class TestPluginRegistry:
         from pathlib import Path
         registry_path = Path("chrome-extension/src/workflows/plugin_registry.ts")
         assert registry_path.exists()
-        
+
         content = registry_path.read_text()
         assert "WorkflowPlugin" in content
         assert "canarySelectors" in content
@@ -372,11 +366,11 @@ class TestPluginRegistry:
             "chrome-extension/src/workflows/grocery_tracker.ts",
             "chrome-extension/src/workflows/instagram_archivist.ts",
         ]
-        
+
         for wf in workflows:
             path = Path(wf)
             assert path.exists(), f"Workflow {wf} not found"
-            
+
             content = path.read_text()
             # Should have global window assignment for plugin registry
             assert "__whatsappWorkflow" in content or "__groceryWorkflow" in content or "__instagramWorkflow" in content
@@ -416,11 +410,41 @@ class TestCanaryWarning:
 
     @pytest.mark.asyncio
     async def test_main_handles_canary_warning(self):
-        """Test that main.py handles SELECTOR_CANARY_WARNING."""
-        content = Path("core-orchestrator/app/main.py").read_text()
+        """Test that main.py handles SELECTOR_CANARY_WARNING end-to-end over WebSocket."""
+        from app.config import get_or_create_bridge_token
+        from app.schemas import BridgeMessage, BridgeMessageType
+        from fastapi.testclient import TestClient
+
+        content = Path("core-orchestrator/app/main.py").read_text(encoding="utf-8")
         assert "SELECTOR_CANARY_WARNING" in content
         assert "missingSelectors" in content
         assert "broadcast_to_dashboards" in content
+
+        client = TestClient(app)
+        token = get_or_create_bridge_token()
+        canary_payload = {
+            "pluginId": "whatsapp_copilot",
+            "pluginName": "WhatsApp Web Co-Pilot",
+            "missingSelectors": ["div.message-in"],
+            "url": "https://web.whatsapp.com/",
+            "timestamp": datetime.now(UTC).isoformat(),
+            "trace_id": "0123456789abcdef0123456789abcdef",
+        }
+        with client.websocket_connect(f"/ws/dashboard?token={token}") as dash_ws:
+            init_frame = json.loads(dash_ws.receive_text())
+            assert init_frame["event"] == "INITIAL_PENDING_APPROVALS"
+
+            with client.websocket_connect(f"/ws/browser-bridge?token={token}") as bridge_ws:
+                msg = BridgeMessage(
+                    msg_type=BridgeMessageType.SELECTOR_CANARY_WARNING,
+                    payload=canary_payload,
+                )
+                bridge_ws.send_text(msg.model_dump_json())
+
+            broadcast = json.loads(dash_ws.receive_text())
+            assert broadcast["event"] == "SELECTOR_CANARY_WARNING"
+            assert broadcast["data"]["pluginId"] == "whatsapp_copilot"
+            assert broadcast["data"]["missingSelectors"] == ["div.message-in"]
 
 
 class TestVersionBump:
@@ -470,10 +494,10 @@ class TestHardcodedPathsAndSecrets:
     def read_file_safe(self, filepath: str) -> str:
         """Read file with UTF-8 encoding, fallback to latin-1."""
         try:
-            with open(filepath, 'r', encoding='utf-8') as f:
+            with open(filepath, encoding='utf-8') as f:
                 return f.read()
         except UnicodeDecodeError:
-            with open(filepath, 'r', encoding='latin-1') as f:
+            with open(filepath, encoding='latin-1') as f:
                 return f.read()
 
     def test_no_hardcoded_secrets(self):
@@ -486,11 +510,11 @@ class TestHardcodedPathsAndSecrets:
             r'api_key\s*=\s*["\'][^"\']+["\']',
             r'password\s*=\s*["\'][^"\']+["\']',
         ]
-        
+
         for root, dirs, files in os.walk("."):
             # Skip certain directories
             dirs[:] = [d for d in dirs if d not in ['node_modules', 'dist', '.git', '__pycache__', '.pytest_temp', 'context_intuition.egg-info']]
-            
+
             for file in files:
                 if file.endswith(('.py', '.ts', '.json', '.yaml', '.yml')):
                     filepath = os.path.join(root, file)
@@ -504,15 +528,15 @@ class TestHardcodedPathsAndSecrets:
                                 if line_end == -1:
                                     line_end = len(content)
                                 line = content[line_start:line_end]
-                                
+
                                 # Skip if in test file or using env vars
                                 if 'test_' in file or 'VIBECORE_' in line or 'os.environ' in line or 'settings.' in line:
                                     continue
-                                
+
                                 # Skip CI workflow files
                                 if '.github' in filepath:
                                     continue
-                                
+
                                 pytest.fail(f"Potential secret in {filepath}: {line.strip()[:100]}")
                     except Exception:
                         pass
@@ -522,12 +546,12 @@ class TestHardcodedPathsAndSecrets:
         import re
         for root, dirs, files in os.walk("."):
             dirs[:] = [d for d in dirs if d not in ['node_modules', 'dist', '.git', '__pycache__', '.pytest_temp', 'context_intuition.egg-info']]
-            
+
             for file in files:
                 if file.endswith(('.py', '.ts')):
                     filepath = os.path.join(root, file)
                     # Skip test files
-                    if 'test_' in file or 'test/' in filepath or 'tests/' in filepath:
+                    if 'test_' in file or 'test/' in filepath or 'tests/' in filepath or 'tests\\' in filepath:
                         continue
                     try:
                         content = self.read_file_safe(filepath)
@@ -537,7 +561,3 @@ class TestHardcodedPathsAndSecrets:
                                 pytest.fail(f"Hardcoded path in {filepath}:{i}: {line.strip()[:120]}")
                     except Exception:
                         pass
-
-
-import os
-from pathlib import Path

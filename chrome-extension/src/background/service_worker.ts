@@ -63,7 +63,7 @@ async function connectWebSocket(): Promise<void> {
       msg_type: 'HANDSHAKE',
       payload: {
         agent: 'vibecore-chrome-bridge',
-        version: '0.1.0',
+        version: '0.3.0',
         userAgent: navigator.userAgent
       },
       timestamp: new Date().toISOString()
@@ -328,7 +328,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         socket.close();
         socket = null;
       }
-      connectWebSocket().then(() => sendResponse({ status: connectionStatus }));
+      connectWebSocket()
+        .then(() => sendResponse({ status: connectionStatus }))
+        .catch(() => sendResponse({ status: connectionStatus }));
       return true;
     }
   }

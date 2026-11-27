@@ -4,8 +4,8 @@ Author: Sandeep Hipparagi (https://github.com/Sandeep-Hipparagi)
 """
 
 import pytest
-from app.schemas import TierLevel, ApprovalStatus
-from enclave import PolicyEnclave, ActionSuspendedException, enforce_policy
+from app.schemas import ApprovalStatus, TierLevel
+from enclave import ActionSuspendedException, PolicyEnclave
 
 
 @pytest.mark.asyncio
@@ -13,7 +13,7 @@ async def test_tier_0_observe_executes_immediately(tmp_path):
     db_file = str(tmp_path / "enclave.db")
     enclave = PolicyEnclave(db_path=db_file)
 
-    tier, risk, factors = enclave.evaluate_risk("gmail_read_threads", {})
+    tier, risk, _factors = enclave.evaluate_risk("gmail_read_threads", {})
     assert tier == TierLevel.TIER_0_OBSERVE
     assert risk <= 0.10
 
